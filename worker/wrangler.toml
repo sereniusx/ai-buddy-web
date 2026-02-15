@@ -1,0 +1,8 @@
+name = "ai-buddy-api"
+main = "src/index.ts"
+compatibility_date = "2026-02-15"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ai_buddy_db"
+database_id = "607933e5-fc94-4e16-ac7d-9df66eb699cb"
