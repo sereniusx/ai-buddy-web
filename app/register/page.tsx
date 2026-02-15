@@ -1,3 +1,4 @@
+// app/register/page.tsx
 "use client";
 
 import { useState } from "react";
@@ -9,7 +10,6 @@ import type { RegisterResp } from "../../lib/types";
 function isApiErr(x: any): x is { ok: false; error: string; detail?: string } {
     return !!x && typeof x === "object" && x.ok === false && typeof x.error === "string";
 }
-
 function isRegisterOk(x: any): x is Extract<RegisterResp, { ok: true }> {
     return !!x && typeof x === "object" && x.ok === true && x.token && x.user;
 }
@@ -39,11 +39,8 @@ export default function RegisterPage() {
             const data = (await res.json().catch(() => null)) as RegisterResp | null;
 
             if (!res.ok) {
-                if (isApiErr(data)) {
-                    setErr(`注册失败：${data.error}`);
-                } else {
-                    setErr(`注册失败：${res.status}`);
-                }
+                if (isApiErr(data)) setErr(`注册失败：${data.error}`);
+                else setErr(`注册失败：${res.status}`);
                 return;
             }
 
@@ -65,7 +62,6 @@ export default function RegisterPage() {
             <div className="card" style={{ maxWidth: 520, margin: "0 auto" }}>
                 <div className="topbar">
                     <div className="brand">
-                        <div className="logo" />
                         <div className="title">
                             <strong>注册 AI Buddy</strong>
                             <span>测试期需要邀请码</span>
@@ -73,31 +69,20 @@ export default function RegisterPage() {
                     </div>
                 </div>
 
-                <div style={{ padding: 16, display: "grid", gap: 12 }}>
+                <div style={{ padding: 14, display: "grid", gap: 12 }}>
                     <input className="input" value={invite} onChange={(e) => setInvite(e.target.value)} placeholder="邀请码" />
-                    <input
-                        className="input"
-                        value={username}
-                        onChange={(e) => setUsername(e.target.value)}
-                        placeholder="用户名（3-24，字母数字_-）"
-                    />
-                    <input
-                        className="input"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        placeholder="密码（≥6）"
-                        type="password"
-                    />
+                    <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="用户名（3-24，字母数字_-）" />
+                    <input className="input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码（≥6）" type="password" />
 
-                    {err ? <div style={{ color: "#fca5a5", fontSize: 13 }}>{err}</div> : null}
+                    {err ? <div className="noticeErr">{err}</div> : null}
 
-                    <button className="btn" onClick={onRegister} disabled={busy} style={{ padding: "12px 14px", borderRadius: 16 }}>
+                    <button className="btn primary" onClick={onRegister} disabled={busy} style={{ padding: "12px 14px" }}>
                         {busy ? "注册中…" : "注册"}
                     </button>
 
-                    <div style={{ fontSize: 13, color: "var(--muted)" }}>
+                    <div className="subtle" style={{ fontSize: 13 }}>
                         已有账号？去{" "}
-                        <a href="/login" style={{ fontWeight: 800 }}>
+                        <a href="/login" style={{ fontWeight: 900 }}>
                             登录
                         </a>
                     </div>

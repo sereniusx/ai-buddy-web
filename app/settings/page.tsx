@@ -1,3 +1,4 @@
+// app/settings/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -6,9 +7,9 @@ import { getSavedUser } from "../../lib/auth";
 import { useRouter } from "next/navigation";
 
 const THEMES = [
-    { id: "default", name: "默认" },
-    { id: "dark", name: "深色" },
-    { id: "milk", name: "奶油" },
+    { id: "system", name: "跟随系统" },
+    { id: "day", name: "日间（太阳/天空）" },
+    { id: "night", name: "夜间（月光/夜空）" },
 ];
 
 const BUBBLES = [
@@ -24,52 +25,34 @@ const TONES = [
     { id: "pragmatic", name: "务实" },
 ];
 
-function themeStyle(themeId: string): React.CSSProperties {
-    if (themeId === "dark") {
-        return { background: "#0b0b0f", color: "#f2f2f3" };
-    }
-    if (themeId === "milk") {
-        return { background: "#fff8f0", color: "#191919" };
-    }
-    return { background: "#ffffff", color: "#111111" };
+function applyTheme(themeId: string) {
+    try {
+        localStorage.setItem("ai_buddy_theme", themeId);
+    } catch {}
+    const preferDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const theme = themeId === "system" ? (preferDark ? "night" : "day") : themeId === "night" ? "night" : "day";
+    document.documentElement.setAttribute("data-theme", theme);
 }
 
-function bubbleStyle(bubble: string, mine: boolean): React.CSSProperties {
-    const base: React.CSSProperties = {
-        padding: "10px 12px",
-        maxWidth: "78%",
-        whiteSpace: "pre-wrap",
-        lineHeight: 1.55,
-        border: "1px solid rgba(0,0,0,0.08)",
-    };
-
-    const radius =
-        bubble === "round" ? 18 : bubble === "flat" ? 10 : 14;
-
-    return {
-        ...base,
-        borderRadius: radius,
-        alignSelf: mine ? "flex-end" : "flex-start",
-        background: mine ? "rgba(0,0,0,0.04)" : "rgba(0,0,0,0.02)",
-    };
+function bubbleRadius(bubble: string) {
+    if (bubble === "round") return 20;
+    if (bubble === "flat") return 12;
+    return 18;
 }
 
 export default function SettingsPage() {
     const router = useRouter();
 
-    // login guard
     useEffect(() => {
         const u = getSavedUser();
         if (!u) router.replace("/login");
     }, [router]);
 
-    // User settings draft
     const [displayName, setDisplayName] = useState("");
     const [userAvatarUrl, setUserAvatarUrl] = useState("");
-    const [themeId, setThemeId] = useState("default");
+    const [themeId, setThemeId] = useState("system");
     const [bubble, setBubble] = useState("default");
 
-    // Companion settings draft
     const [companionName, setCompanionName] = useState("小伴");
     const [companionAvatarUrl, setCompanionAvatarUrl] = useState("");
     const [toneStyle, setToneStyle] = useState("warm");
@@ -77,7 +60,20 @@ export default function SettingsPage() {
     const [busy, setBusy] = useState(false);
     const [msg, setMsg] = useState<string | null>(null);
 
-    const previewStyle = useMemo(() => themeStyle(themeId), [themeId]);
+    useEffect(() => {
+        // 初始读 localStorage（前端即时生效）
+        try {
+            const saved = localStorage.getItem("ai_buddy_theme");
+            if (saved && (saved === "system" || saved === "day" || saved === "night")) {
+                setThemeId(saved);
+                applyTheme(saved);
+            } else {
+                applyTheme("system");
+            }
+        } catch {}
+    }, []);
+
+    const previewBubbleRadius = useMemo(() => bubbleRadius(bubble), [bubble]);
 
     async function saveUser() {
         setMsg(null);
@@ -88,7 +84,7 @@ export default function SettingsPage() {
                 body: JSON.stringify({
                     display_name: displayName.trim() || null,
                     avatar_url: userAvatarUrl.trim() || null,
-                    theme_id: themeId,
+                    theme_id: themeId, // system/day/night
                     bubble_style: bubble,
                 }),
             });
@@ -99,6 +95,8 @@ export default function SettingsPage() {
                 if (res.status === 401) router.replace("/login");
                 return;
             }
+
+            applyTheme(themeId);
             setMsg("✅ 已保存用户设置");
         } finally {
             setBusy(false);
@@ -131,199 +129,178 @@ export default function SettingsPage() {
     }
 
     return (
-        <div style={{ maxWidth: 900, margin: "0 auto", padding: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-                <h1 style={{ fontSize: 20, fontWeight: 800, margin: 0 }}>设置</h1>
-                <a href="/" style={{ color: "#111", fontWeight: 700, fontSize: 13 }}>
-                    返回聊天
-                </a>
-            </div>
-
-            {msg ? <div style={{ marginTop: 10, fontSize: 13, color: msg.startsWith("✅") ? "green" : "crimson" }}>{msg}</div> : null}
-
-            <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                {/* User settings */}
-                <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-                    <div style={{ fontWeight: 700 }}>用户</div>
-
-                    <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                        <label style={{ fontSize: 12, color: "#666" }}>
-                            昵称（display_name）
-                            <input
-                                value={displayName}
-                                onChange={(e) => setDisplayName(e.target.value)}
-                                placeholder="比如：serenius"
-                                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginTop: 6 }}
-                            />
-                        </label>
-
-                        <label style={{ fontSize: 12, color: "#666" }}>
-                            头像 URL（avatar_url）— 第一阶段先填 URL，后续接上传
-                            <input
-                                value={userAvatarUrl}
-                                onChange={(e) => setUserAvatarUrl(e.target.value)}
-                                placeholder="https://..."
-                                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginTop: 6 }}
-                            />
-                        </label>
-
-                        <label style={{ fontSize: 12, color: "#666" }}>
-                            主题（theme_id）
-                            <select
-                                value={themeId}
-                                onChange={(e) => setThemeId(e.target.value)}
-                                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginTop: 6 }}
-                            >
-                                {THEMES.map((t) => (
-                                    <option key={t.id} value={t.id}>
-                                        {t.name}
-                                    </option>
-                                ))}
-                            </select>
-                        </label>
-
-                        <label style={{ fontSize: 12, color: "#666" }}>
-                            气泡样式（bubble_style）
-                            <select
-                                value={bubble}
-                                onChange={(e) => setBubble(e.target.value)}
-                                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginTop: 6 }}
-                            >
-                                {BUBBLES.map((b) => (
-                                    <option key={b.id} value={b.id}>
-                                        {b.name}
-                                    </option>
-                                ))}
-                            </select>
-                        </label>
-
-                        <button
-                            onClick={saveUser}
-                            disabled={busy}
-                            style={{ padding: "10px 14px", borderRadius: 10, border: "1px solid #ddd" }}
-                        >
-                            {busy ? "保存中…" : "保存用户设置"}
-                        </button>
-                    </div>
-                </div>
-
-                {/* Companion settings */}
-                <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-                    <div style={{ fontWeight: 700 }}>陪伴体</div>
-
-                    <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                        <label style={{ fontSize: 12, color: "#666" }}>
-                            名称（companion_name）
-                            <input
-                                value={companionName}
-                                onChange={(e) => setCompanionName(e.target.value)}
-                                placeholder="比如：小伴"
-                                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginTop: 6 }}
-                            />
-                        </label>
-
-                        <label style={{ fontSize: 12, color: "#666" }}>
-                            头像 URL（companion_avatar_url）— 第一阶段先填 URL，后续接上传
-                            <input
-                                value={companionAvatarUrl}
-                                onChange={(e) => setCompanionAvatarUrl(e.target.value)}
-                                placeholder="https://..."
-                                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginTop: 6 }}
-                            />
-                        </label>
-
-                        <label style={{ fontSize: 12, color: "#666" }}>
-                            语气（tone_style）
-                            <select
-                                value={toneStyle}
-                                onChange={(e) => setToneStyle(e.target.value)}
-                                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd", marginTop: 6 }}
-                            >
-                                {TONES.map((t) => (
-                                    <option key={t.id} value={t.id}>
-                                        {t.name}
-                                    </option>
-                                ))}
-                            </select>
-                        </label>
-
-                        <button
-                            onClick={saveCompanion}
-                            disabled={busy}
-                            style={{ padding: "10px 14px", borderRadius: 10, border: "1px solid #ddd" }}
-                        >
-                            {busy ? "保存中…" : "保存陪伴体设置"}
-                        </button>
-                    </div>
-                </div>
-            </div>
-
-            {/* Preview */}
-            <div style={{ marginTop: 12, border: "1px solid #eee", borderRadius: 12, padding: 12, ...previewStyle }}>
-                <div style={{ fontWeight: 800, marginBottom: 8 }}>预览</div>
-
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                    <div
-                        style={{
-                            width: 42,
-                            height: 42,
-                            borderRadius: 12,
-                            overflow: "hidden",
-                            border: "1px solid rgba(0,0,0,0.1)",
-                            background: "rgba(0,0,0,0.06)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            fontWeight: 800,
-                        }}
-                        title="用户头像预览"
-                    >
-                        {userAvatarUrl ? <img src={userAvatarUrl} alt="me" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : "你"}
-                    </div>
-
-                    <div style={{ fontWeight: 700 }}>{displayName.trim() || "你"}</div>
-
-                    <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
-                        <div
-                            style={{
-                                width: 42,
-                                height: 42,
-                                borderRadius: 12,
-                                overflow: "hidden",
-                                border: "1px solid rgba(0,0,0,0.1)",
-                                background: "rgba(0,0,0,0.06)",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontWeight: 800,
-                            }}
-                            title="陪伴体头像预览"
-                        >
-                            {companionAvatarUrl ? (
-                                <img src={companionAvatarUrl} alt="companion" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                            ) : (
-                                "TA"
-                            )}
+        <div className="container">
+            <div className="card">
+                <div className="topbar">
+                    <div className="brand">
+                        <div className="title">
+                            <strong>设置</strong>
+                            <span>外观 · 头像 · 陪伴体</span>
                         </div>
-                        <div style={{ fontWeight: 700 }}>{companionName.trim() || "小伴"}</div>
+                    </div>
+
+                    <div className="actions">
+                        <a className="btn" href="/">
+                            返回聊天
+                        </a>
                     </div>
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    <div style={bubbleStyle(bubble, false)}>
-                        {companionName.trim() || "小伴"}：嗯…我在。你想先从哪里开始说？
+                <div style={{ padding: 14 }}>
+                    {msg ? <div className={msg.startsWith("✅") ? "noticeOk" : "noticeErr"}>{msg}</div> : null}
+
+                    <div className="grid2" style={{ marginTop: 12 }}>
+                        <div className="panel">
+                            <div style={{ fontWeight: 900 }}>用户</div>
+                            <div className="subtle" style={{ marginTop: 6 }}>
+                                头像第一阶段先用 URL（后续可接 R2 上传）
+                            </div>
+
+                            <div className="hr" />
+
+                            <label className="subtle">
+                                昵称（display_name）
+                                <input className="input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="比如：serenius" />
+                            </label>
+
+                            <div style={{ height: 10 }} />
+
+                            <label className="subtle">
+                                头像 URL（avatar_url）
+                                <input className="input" value={userAvatarUrl} onChange={(e) => setUserAvatarUrl(e.target.value)} placeholder="https://..." />
+                            </label>
+
+                            <div style={{ height: 10 }} />
+
+                            <label className="subtle">
+                                主题（theme_id）
+                                <select
+                                    className="select"
+                                    value={themeId}
+                                    onChange={(e) => {
+                                        const v = e.target.value;
+                                        setThemeId(v);
+                                        applyTheme(v);
+                                    }}
+                                >
+                                    {THEMES.map((t) => (
+                                        <option key={t.id} value={t.id}>
+                                            {t.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+
+                            <div style={{ height: 10 }} />
+
+                            <label className="subtle">
+                                气泡样式（bubble_style）
+                                <select className="select" value={bubble} onChange={(e) => setBubble(e.target.value)}>
+                                    {BUBBLES.map((b) => (
+                                        <option key={b.id} value={b.id}>
+                                            {b.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+
+                            <div style={{ height: 12 }} />
+
+                            <button className="btn primary" onClick={saveUser} disabled={busy}>
+                                {busy ? "保存中…" : "保存用户设置"}
+                            </button>
+                        </div>
+
+                        <div className="panel">
+                            <div style={{ fontWeight: 900 }}>陪伴体</div>
+                            <div className="subtle" style={{ marginTop: 6 }}>
+                                建议：头像尽量用干净背景，圆角会更好看
+                            </div>
+
+                            <div className="hr" />
+
+                            <label className="subtle">
+                                名称（companion_name）
+                                <input className="input" value={companionName} onChange={(e) => setCompanionName(e.target.value)} placeholder="比如：小伴" />
+                            </label>
+
+                            <div style={{ height: 10 }} />
+
+                            <label className="subtle">
+                                头像 URL（companion_avatar_url）
+                                <input
+                                    className="input"
+                                    value={companionAvatarUrl}
+                                    onChange={(e) => setCompanionAvatarUrl(e.target.value)}
+                                    placeholder="https://..."
+                                />
+                            </label>
+
+                            <div style={{ height: 10 }} />
+
+                            <label className="subtle">
+                                语气（tone_style）
+                                <select className="select" value={toneStyle} onChange={(e) => setToneStyle(e.target.value)}>
+                                    {TONES.map((t) => (
+                                        <option key={t.id} value={t.id}>
+                                            {t.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+
+                            <div style={{ height: 12 }} />
+
+                            <button className="btn primary" onClick={saveCompanion} disabled={busy}>
+                                {busy ? "保存中…" : "保存陪伴体设置"}
+                            </button>
+                        </div>
                     </div>
-                    <div style={bubbleStyle(bubble, true)}>
-                        {displayName.trim() || "你"}：我只是想找个人聊聊。
-                    </div>
-                    <div style={bubbleStyle(bubble, false)}>
-                        {companionName.trim() || "小伴"}：好，那就慢慢来。今天让你最累的是什么？
+
+                    <div className="panel" style={{ marginTop: 12 }}>
+                        <div style={{ fontWeight: 900, marginBottom: 8 }}>预览</div>
+
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                            <div className="avatar" title="用户头像预览" style={{ width: 42, height: 42, borderRadius: 16 }}>
+                                {userAvatarUrl ? <img src={userAvatarUrl} alt="me" /> : <div className="fallback">你</div>}
+                            </div>
+
+                            <div style={{ fontWeight: 800 }}>{displayName.trim() || "你"}</div>
+
+                            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+                                <div className="avatar" title="陪伴体头像预览" style={{ width: 42, height: 42, borderRadius: 16 }}>
+                                    {companionAvatarUrl ? <img src={companionAvatarUrl} alt="companion" /> : <div className="fallback">TA</div>}
+                                </div>
+                                <div style={{ fontWeight: 800 }}>{companionName.trim() || "小伴"}</div>
+                            </div>
+                        </div>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                            <div
+                                className="bubble assistant"
+                                style={{ borderRadius: previewBubbleRadius }}
+                            >
+                                {companionName.trim() || "小伴"}：嗯…我在。你想先从哪里开始说？
+                            </div>
+                            <div
+                                className="bubble user"
+                                style={{ borderRadius: previewBubbleRadius, marginLeft: "auto" }}
+                            >
+                                {displayName.trim() || "你"}：我只是想找个人聊聊。
+                            </div>
+                            <div
+                                className="bubble assistant"
+                                style={{ borderRadius: previewBubbleRadius }}
+                            >
+                                {companionName.trim() || "小伴"}：好，那就慢慢来。今天让你最累的是什么？
+                            </div>
+                        </div>
+
+                        <div style={{ marginTop: 10 }} className="subtle">
+                            主题说明：白天强调色=太阳/天空；夜晚强调色=月光/夜空。
+                        </div>
                     </div>
                 </div>
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 12, color: "#666" }}>
-                备注：你说头像是“用户上传”，这需要配合一个存储（R2/Images）。第一阶段先用 URL 占位，等你决定存储方案我再把“上传接口+前端上传控件”一起补上。
             </div>
         </div>
     );

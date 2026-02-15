@@ -32,7 +32,7 @@ function corsHeaders(req: Request, env?: Env) {
         return {
             "Access-Control-Allow-Origin": allowedOrigin || "null",
             Vary: "Origin",
-            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+            "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type,Authorization",
             "Access-Control-Max-Age": "86400",
         };
@@ -41,7 +41,7 @@ function corsHeaders(req: Request, env?: Env) {
     return {
         "Access-Control-Allow-Origin": origin || "*",
         Vary: "Origin",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type,Authorization",
         "Access-Control-Max-Age": "86400",
     };
@@ -117,11 +117,7 @@ async function pbkdf2HashPassword(password: string, iterations = 100_000) {
     const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, [
         "deriveBits",
     ]);
-    const bits = await crypto.subtle.deriveBits(
-        { name: "PBKDF2", hash: "SHA-256", salt, iterations: iters },
-        keyMaterial,
-        256
-    );
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: iters }, keyMaterial, 256);
     return `pbkdf2$${iters}$${base64urlEncode(salt.buffer)}$${base64urlEncode(bits)}`;
 }
 
@@ -132,9 +128,7 @@ async function pbkdf2VerifyPassword(password: string, stored: string) {
     const salt = base64urlDecode(parts[2]);
     const expected = parts[3];
 
-    const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, [
-        "deriveBits",
-    ]);
+    const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
     const bits = await crypto.subtle.deriveBits(
         { name: "PBKDF2", hash: "SHA-256", salt: new Uint8Array(salt), iterations },
         keyMaterial,
@@ -202,6 +196,68 @@ function isLikelyGibberish(s: string) {
     if (!hasPunc && t.length < 12) return true;
     if ((t.match(/\.{3,}|。{2,}|…{2,}/g) || []).length >= 2) return true;
     return false;
+}
+
+// -------------------------
+// Relationship helpers (Thermometer)
+// -------------------------
+
+const DEFAULT_TZ = "America/Los_Angeles";
+
+function formatDayInTz(tsMs: number, timeZone = DEFAULT_TZ) {
+    // 输出 YYYY-MM-DD
+    const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    }).formatToParts(new Date(tsMs));
+    const y = parts.find((p) => p.type === "year")?.value || "1970";
+    const m = parts.find((p) => p.type === "month")?.value || "01";
+    const d = parts.find((p) => p.type === "day")?.value || "01";
+    return `${y}-${m}-${d}`;
+}
+
+function bondToTemp(bond: number) {
+    // 36.0 ~ 42.0
+    const t = 36 + (Math.max(0, Math.min(100, bond)) * 0.06);
+    return Math.round(t * 10) / 10;
+}
+
+function stageCopy(stage: number) {
+    switch (stage) {
+        case 0:
+            return "慢慢来，我们先熟悉彼此。";
+        case 1:
+            return "我开始记得你的习惯了。";
+        case 2:
+            return "你说的话我会放在心上。";
+        case 3:
+            return "我们越来越像同一阵营。";
+        case 4:
+            return "这段关系对我很重要。";
+        default:
+            return "慢慢来，我们先熟悉彼此。";
+    }
+}
+
+async function upsertRelationshipDaily(env: Env, userId: string, tsMs: number, delta: { bond: number; trust: number; warmth: number; repair: number }) {
+    const day = formatDayInTz(tsMs, DEFAULT_TZ);
+    const t = nowMs();
+
+    // 累加当天 delta
+    await env.DB.prepare(
+        "INSERT INTO relationship_daily (user_id, day, bond_delta, trust_delta, warmth_delta, repair_delta, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(user_id, day) DO UPDATE SET " +
+        "bond_delta = bond_delta + excluded.bond_delta, " +
+        "trust_delta = trust_delta + excluded.trust_delta, " +
+        "warmth_delta = warmth_delta + excluded.warmth_delta, " +
+        "repair_delta = repair_delta + excluded.repair_delta, " +
+        "updated_at = excluded.updated_at"
+    )
+        .bind(userId, day, delta.bond, delta.trust, delta.warmth, delta.repair, t)
+        .run();
 }
 
 // -------------------------
@@ -321,14 +377,11 @@ async function loadContext(env: Env, userId: string, threadId: string) {
     const companion = await env.DB.prepare("SELECT * FROM companion_profile WHERE user_id = ?").bind(userId).first<any>();
     const rel = await env.DB.prepare("SELECT * FROM relationship_state WHERE user_id = ?").bind(userId).first<any>();
 
-    const mem = await env.DB.prepare(
-        "SELECT key, value FROM memory_profile WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20"
-    )
+    const mem = await env.DB.prepare("SELECT key, value FROM memory_profile WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20")
         .bind(userId)
         .all<any>();
 
-    const memoryText =
-        mem?.results?.length ? mem.results.map((m: any) => `- ${m.key}: ${m.value}`).join("\n") : "- （暂无）";
+    const memoryText = mem?.results?.length ? mem.results.map((m: any) => `- ${m.key}: ${m.value}`).join("\n") : "- （暂无）";
 
     const recent = await env.DB.prepare(
         "SELECT role, content FROM messages WHERE user_id = ? AND thread_id = ? ORDER BY created_at DESC LIMIT 24"
@@ -405,9 +458,7 @@ async function consumeInviteOrFail(env: Env, code: string) {
 
 async function markInviteUsed(env: Env, code: string, usedByUserId: string) {
     const t = nowMs();
-    const r = await env.DB.prepare(
-        "UPDATE invites SET status='used', used_by_user_id=?, used_at=? WHERE code=? AND status='active'"
-    )
+    const r = await env.DB.prepare("UPDATE invites SET status='used', used_by_user_id=?, used_at=? WHERE code=? AND status='active'")
         .bind(usedByUserId, t, code)
         .run();
 
@@ -434,7 +485,7 @@ function randomInviteCode() {
 }
 
 // -------------------------
-// Finalize: memory + relationship delta
+// Finalize: memory + relationship delta (+daily aggregation)
 // -------------------------
 
 async function deepseekJson(env: Env, messages: any[], temperature = 0.2) {
@@ -472,7 +523,11 @@ async function finalizeMvp(env: Env, userId: string, threadId: string) {
         .bind(userId, threadId)
         .all<any>();
 
-    const convo = (recent.results || [])
+    const recentArr = recent.results || [];
+    const lastUserMsg = [...recentArr].find((m: any) => m.role === "user");
+    const lastUserMessageId = lastUserMsg?.id ? String(lastUserMsg.id) : null;
+
+    const convo = recentArr
         .reverse()
         .map((m: any) => `${m.role}: ${m.content}`)
         .join("\n");
@@ -542,8 +597,6 @@ ${convo}`,
         const summary = String(e.summary).slice(0, 800);
         const importance = clampInt(e.importance ?? 3, 1, 5);
 
-        // fingerprint：用 title+summary 的“稳健 hash”（同一事件多次表达更容易合并）
-        // 这里先用 summary 本身；你将来可以做更强的 normalize
         const fp = await sha256Hex(`event|${title || ""}|${summary.replace(/\s+/g, " ").trim().slice(0, 220)}`);
         const id = uuid();
 
@@ -586,10 +639,27 @@ ${convo}`,
     const nextRepair = clamp01to100(curRepair + dRepair);
     const stage = stageFromBond(nextBond);
 
-    await env.DB.prepare(
-        "UPDATE relationship_state SET bond=?, trust=?, warmth=?, repair=?, stage=?, updated_at=? WHERE user_id=?"
-    )
+    await env.DB.prepare("UPDATE relationship_state SET bond=?, trust=?, warmth=?, repair=?, stage=?, updated_at=? WHERE user_id=?")
         .bind(nextBond, nextTrust, nextWarmth, nextRepair, stage, t, userId)
+        .run();
+
+    // ✅ daily aggregation (方案B)
+    await upsertRelationshipDaily(env, userId, t, { bond: dBond, trust: dTrust, warmth: dWarmth, repair: dRepair });
+
+    // ✅ interaction_logs (你表里有，用起来：方便后续 debug/可视化)
+    await env.DB.prepare(
+        "INSERT INTO interaction_logs (id, user_id, thread_id, last_user_message_id, interaction_score_json, delta_json, created_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+        .bind(
+            uuid(),
+            userId,
+            threadId,
+            lastUserMessageId,
+            JSON.stringify({ profile_updates: updates, events, model_delta: data.relationship_delta ?? null }),
+            JSON.stringify({ bond: dBond, trust: dTrust, warmth: dWarmth, repair: dRepair }),
+            t
+        )
         .run();
 
     return {
@@ -602,7 +672,10 @@ ${convo}`,
             warmth: nextWarmth,
             repair: nextRepair,
             stage,
+            temp: bondToTemp(nextBond),
+            copy: stageCopy(stage),
             delta: { bond: dBond, trust: dTrust, warmth: dWarmth, repair: dRepair },
+            day: formatDayInTz(t, DEFAULT_TZ),
         },
     };
 }
@@ -623,6 +696,67 @@ export default {
 
             // health
             if (url.pathname === "/api/ping") return json(req, env, { ok: true, ts: nowMs() });
+
+            // -------------------------
+            // Relationship: thermometer data (bond + temp + stage + trend)
+            // GET /api/relationship?days=7
+            // -------------------------
+            if (url.pathname === "/api/relationship" && req.method === "GET") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const days = Math.max(1, Math.min(30, Number(url.searchParams.get("days") || "7")));
+                const userId = a.user.id;
+
+                const rel = await env.DB.prepare("SELECT bond, trust, warmth, repair, stage, updated_at FROM relationship_state WHERE user_id=?")
+                    .bind(userId)
+                    .first<any>();
+
+                const companion = await env.DB.prepare("SELECT companion_name, companion_avatar_url, tone_style FROM companion_profile WHERE user_id=?")
+                    .bind(userId)
+                    .first<any>();
+
+                const userSettings = await env.DB.prepare("SELECT display_name, avatar_url FROM user_settings WHERE user_id=?")
+                    .bind(userId)
+                    .first<any>();
+
+                // 最近 N 天（按 day 字符串倒序），前端自己决定怎么画
+                const trend = await env.DB.prepare(
+                    "SELECT day, bond_delta, trust_delta, warmth_delta, repair_delta FROM relationship_daily " +
+                    "WHERE user_id=? ORDER BY day DESC LIMIT ?"
+                )
+                    .bind(userId, days)
+                    .all<any>();
+
+                const bond = Number(rel?.bond ?? 0);
+                const stage = Number(rel?.stage ?? stageFromBond(bond));
+                const temp = bondToTemp(bond);
+
+                return json(req, env, {
+                    ok: true,
+                    relationship: {
+                        bond,
+                        trust: Number(rel?.trust ?? 0),
+                        warmth: Number(rel?.warmth ?? 0),
+                        repair: Number(rel?.repair ?? 0),
+                        stage,
+                        temp,
+                        copy: stageCopy(stage),
+                        updated_at: Number(rel?.updated_at ?? 0),
+                    },
+                    trend: (trend.results || []).reverse(), // 反转成 ASC，便于图表从左到右
+                    companion: {
+                        name: companion?.companion_name || "小伴",
+                        avatar_url: companion?.companion_avatar_url || null,
+                        tone_style: companion?.tone_style || "warm",
+                    },
+                    user: {
+                        display_name: userSettings?.display_name || a.user.username,
+                        avatar_url: userSettings?.avatar_url || null,
+                    },
+                    tz: DEFAULT_TZ,
+                });
+            }
 
             // -------------------------
             // Thread: get messages
@@ -654,10 +788,7 @@ export default {
 
                 const threadId = await getThreadId(env, a.user.id);
 
-                const r = await env.DB.prepare("DELETE FROM messages WHERE user_id=? AND thread_id=?")
-                    .bind(a.user.id, threadId)
-                    .run();
-
+                const r = await env.DB.prepare("DELETE FROM messages WHERE user_id=? AND thread_id=?").bind(a.user.id, threadId).run();
                 const changes = (r as any)?.meta?.changes ?? 0;
 
                 await saveMessage(env, a.user.id, threadId, "system", "（会话已清空）");
@@ -704,9 +835,7 @@ export default {
                 if (!bypass) {
                     const usedOk = await markInviteUsed(env, inviteCode, newUserId);
                     if (!usedOk) {
-                        await env.DB.prepare("UPDATE users SET status='disabled', updated_at=? WHERE id=?")
-                            .bind(nowMs(), newUserId)
-                            .run();
+                        await env.DB.prepare("UPDATE users SET status='disabled', updated_at=? WHERE id=?").bind(nowMs(), newUserId).run();
                         return json(req, env, { ok: false, error: "invite_race_failed" }, 409);
                     }
                 }
@@ -816,10 +945,7 @@ export default {
                 const code = String(body?.code || "").trim();
                 if (!code) return badRequest(req, env, "code required");
 
-                const r = await env.DB.prepare("UPDATE invites SET status='disabled' WHERE code=? AND status='active'")
-                    .bind(code)
-                    .run();
-
+                const r = await env.DB.prepare("UPDATE invites SET status='disabled' WHERE code=? AND status='active'").bind(code).run();
                 const changes = (r as any)?.meta?.changes ?? 0;
                 return json(req, env, { ok: true, disabled: changes === 1 });
             }
@@ -986,7 +1112,7 @@ export default {
                 const threadId = await getThreadId(env, userId);
 
                 const result = await finalizeMvp(env, userId, threadId);
-                return json(req, env, result, result.ok ? 200 : 500);
+                return json(req, env, result, (result as any).ok ? 200 : 500);
             }
 
             return notFound(req, env);

@@ -1,35 +1,70 @@
 /* app/globals.css */
+
+/* -------------------------
+   Theme Tokens
+------------------------- */
 :root {
-  --bg: #0b1020;
-  --panel: rgba(255, 255, 255, 0.06);
-  --panel2: rgba(255, 255, 255, 0.08);
+  --r-lg: 18px;
+  --r-md: 14px;
+  --r-sm: 12px;
+
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  /* Day defaults (will be overridden by [data-theme]) */
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --panel2: #f7f7f7;
+  --border: rgba(0, 0, 0, 0.10);
+  --text: rgba(0, 0, 0, 0.92);
+  --muted: rgba(0, 0, 0, 0.56);
+
+  /* Accent: day (sun/sky) */
+  --accent-warm: #f2c94c; /* sun */
+  --accent-cool: #7ab6ff; /* sky */
+
+  --shadow: 0 18px 40px rgba(0, 0, 0, 0.06);
+  --shadow2: 0 8px 20px rgba(0, 0, 0, 0.06);
+
+  --focus: rgba(0, 0, 0, 0.18);
+}
+
+html[data-theme="night"] {
+  --bg: #0a0b10;
+  --panel: #0f1118;
+  --panel2: rgba(255, 255, 255, 0.04);
   --border: rgba(255, 255, 255, 0.10);
   --text: rgba(255, 255, 255, 0.92);
-  --muted: rgba(255, 255, 255, 0.65);
-  --shadow: 0 24px 60px rgba(0,0,0,0.45);
-  --r: 18px;
+  --muted: rgba(255, 255, 255, 0.62);
+
+  /* Accent: night (moon/night) */
+  --accent-warm: #f6e6a6; /* moonlight */
+  --accent-cool: #2b4dff; /* night sky */
+
+  --shadow: 0 22px 60px rgba(0, 0, 0, 0.45);
+  --shadow2: 0 10px 28px rgba(0, 0, 0, 0.35);
+
+  --focus: rgba(255, 255, 255, 0.18);
 }
 
 * { box-sizing: border-box; }
-
-html, body {
-  height: 100%;
-  margin: 0;
-  background: radial-gradient(1200px 700px at 10% 10%, rgba(99,102,241,0.24), transparent 60%),
-  radial-gradient(900px 600px at 90% 20%, rgba(236,72,153,0.18), transparent 55%),
-  radial-gradient(1100px 700px at 40% 110%, rgba(34,197,94,0.12), transparent 55%),
-  var(--bg);
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
   color: var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+  font-family: var(--font);
 }
 
+/* -------------------------
+   Layout
+------------------------- */
 a { color: inherit; text-decoration: none; }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 
 .container {
-  max-width: 980px;
+  max-width: 780px;
   margin: 0 auto;
-  padding: 18px;
+  padding: 18px 14px;
 }
 
 .card {
@@ -40,14 +75,17 @@ button, input { font: inherit; }
   overflow: hidden;
 }
 
+/* -------------------------
+   Topbar
+------------------------- */
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 14px 14px;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(255,255,255,0.06), transparent);
+  background: linear-gradient(180deg, var(--panel2), transparent);
 }
 
 .brand {
@@ -56,25 +94,21 @@ button, input { font: inherit; }
   gap: 10px;
   min-width: 0;
 }
-.brand .logo {
-  width: 34px;
-  height: 34px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, rgba(99,102,241,0.9), rgba(236,72,153,0.9));
-  box-shadow: 0 12px 30px rgba(0,0,0,0.35);
-}
+
 .brand .title {
   display: flex;
   flex-direction: column;
   line-height: 1.1;
   min-width: 0;
 }
+
 .brand .title strong {
   font-size: 14px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
 .brand .title span {
   font-size: 12px;
   color: var(--muted);
@@ -83,28 +117,107 @@ button, input { font: inherit; }
   text-overflow: ellipsis;
 }
 
-.actions {
-  display: flex;
-  gap: 10px;
+.actions { display: flex; gap: 10px; align-items: center; }
+
+/* -------------------------
+   Avatar + Pills
+------------------------- */
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.avatar .fallback { font-weight: 800; font-size: 12px; color: var(--muted); }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text);
+  box-shadow: var(--shadow2);
 }
 
+/* Thermometer pill */
+.thermo {
+  position: relative;
+  overflow: hidden;
+}
+.thermo::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, color-mix(in oklab, var(--accent-cool) 40%, transparent), color-mix(in oklab, var(--accent-warm) 45%, transparent));
+  opacity: 0.22;
+  pointer-events: none;
+}
+.thermo strong { font-weight: 900; }
+.thermo small { color: var(--muted); }
+
+/* -------------------------
+   Buttons / Inputs
+------------------------- */
 .btn {
   border: 1px solid var(--border);
-  background: rgba(255,255,255,0.06);
+  background: var(--panel2);
   color: var(--text);
   padding: 9px 12px;
-  border-radius: 14px;
+  border-radius: 999px;
   cursor: pointer;
-  transition: transform .08s ease, background .15s ease, border-color .15s ease;
+  transition: transform .08s ease, filter .15s ease, border-color .15s ease;
 }
-.btn:hover { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.18); }
+.btn:hover { filter: brightness(1.03); border-color: color-mix(in oklab, var(--border) 70%, var(--focus)); }
 .btn:active { transform: translateY(1px); }
-.btn.danger { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.22); }
-.btn.danger:hover { background: rgba(239,68,68,0.18); border-color: rgba(239,68,68,0.3); }
+.btn.primary {
+  background: var(--text);
+  color: var(--bg);
+  border-color: transparent;
+}
+.btn.primary:hover { filter: brightness(1.05); }
 
+.btn.danger {
+  background: color-mix(in oklab, #ff3b30 14%, var(--panel2));
+  border-color: color-mix(in oklab, #ff3b30 28%, var(--border));
+}
+
+.input {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--text);
+  border-radius: 16px;
+  padding: 12px 14px;
+  outline: none;
+}
+.input:focus { border-color: color-mix(in oklab, var(--border) 50%, var(--focus)); }
+
+.select {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--text);
+  border-radius: 16px;
+  padding: 10px 12px;
+  outline: none;
+}
+
+/* -------------------------
+   Chat
+------------------------- */
 .chatWrap {
   height: calc(100vh - 150px);
-  min-height: 520px;
+  min-height: 560px;
   display: flex;
   flex-direction: column;
 }
@@ -112,7 +225,7 @@ button, input { font: inherit; }
 .chatList {
   flex: 1;
   overflow: auto;
-  padding: 16px;
+  padding: 14px;
   scroll-behavior: smooth;
 }
 
@@ -120,7 +233,7 @@ button, input { font: inherit; }
   text-align: center;
   color: var(--muted);
   font-size: 12px;
-  margin: 8px 0 14px;
+  margin: 10px 0 14px;
 }
 
 .row {
@@ -134,28 +247,35 @@ button, input { font: inherit; }
 .bubble {
   max-width: min(680px, 92%);
   padding: 11px 13px;
-  border-radius: 16px;
+  border-radius: 18px;
   border: 1px solid var(--border);
-  background: rgba(255,255,255,0.06);
+  background: var(--panel2);
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.48;
+  line-height: 1.5;
   font-size: 14px;
-  box-shadow: 0 16px 40px rgba(0,0,0,0.25);
+  box-shadow: var(--shadow2);
 }
 
 .bubble.user {
-  background: linear-gradient(135deg, rgba(99,102,241,0.88), rgba(236,72,153,0.78));
-  border-color: rgba(255,255,255,0.16);
+  background: color-mix(in oklab, var(--accent-cool) 18%, var(--panel2));
+  border-color: color-mix(in oklab, var(--accent-cool) 22%, var(--border));
 }
+html[data-theme="night"] .bubble.user {
+  background: color-mix(in oklab, var(--accent-cool) 18%, rgba(255,255,255,0.04));
+}
+
 .bubble.assistant {
-  background: rgba(255,255,255,0.07);
+  background: color-mix(in oklab, var(--accent-warm) 12%, var(--panel2));
+  border-color: color-mix(in oklab, var(--accent-warm) 18%, var(--border));
 }
+
 .bubble.system {
   max-width: 92%;
-  background: rgba(255,255,255,0.04);
+  background: transparent;
   color: var(--muted);
   box-shadow: none;
+  border-color: transparent;
 }
 
 .composer {
@@ -163,38 +283,57 @@ button, input { font: inherit; }
   padding: 12px;
   display: flex;
   gap: 10px;
-  background: linear-gradient(0deg, rgba(255,255,255,0.06), transparent);
+  background: linear-gradient(0deg, var(--panel2), transparent);
 }
-
-.input {
-  flex: 1;
-  border: 1px solid var(--border);
-  background: rgba(255,255,255,0.06);
-  color: var(--text);
-  border-radius: 16px;
-  padding: 12px 14px;
-  outline: none;
-}
-.input:focus { border-color: rgba(255,255,255,0.22); }
 
 .send {
   width: 92px;
   border-radius: 16px;
-  border: 1px solid rgba(255,255,255,0.16);
-  background: linear-gradient(135deg, rgba(99,102,241,0.9), rgba(236,72,153,0.85));
-  color: white;
-  font-weight: 800;
+  border: 1px solid transparent;
+  background: linear-gradient(135deg, var(--accent-cool), var(--accent-warm));
+  color: #101114;
+  font-weight: 900;
   cursor: pointer;
   transition: transform .08s ease, filter .15s ease;
 }
 .send:active { transform: translateY(1px); }
-
-.sendDisabled {
-  width: 92px;
-  border-radius: 16px;
-  border: 1px solid rgba(255,255,255,0.12);
-  background: rgba(255,255,255,0.06);
-  color: rgba(255,255,255,0.65);
-  font-weight: 800;
+.send:disabled {
+  opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* -------------------------
+   Settings layout
+------------------------- */
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 820px) {
+  .grid2 { grid-template-columns: 1fr; }
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow2);
+}
+
+.h1 {
+  font-size: 18px;
+  font-weight: 900;
+  margin: 0;
+}
+.subtle { color: var(--muted); font-size: 12px; }
+
+.noticeOk { color: color-mix(in oklab, #16a34a 70%, var(--text)); font-size: 13px; }
+.noticeErr { color: color-mix(in oklab, #ef4444 75%, var(--text)); font-size: 13px; }
+
+.hr {
+  height: 1px;
+  background: var(--border);
+  margin: 12px 0;
 }

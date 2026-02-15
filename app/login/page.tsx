@@ -1,3 +1,4 @@
+// app/login/page.tsx
 "use client";
 
 import { useState } from "react";
@@ -9,7 +10,6 @@ import type { LoginResp } from "../../lib/types";
 function isApiErr(x: any): x is { ok: false; error: string; detail?: string } {
     return !!x && typeof x === "object" && x.ok === false && typeof x.error === "string";
 }
-
 function isLoginOk(x: any): x is Extract<LoginResp, { ok: true }> {
     return !!x && typeof x === "object" && x.ok === true && x.token && x.user;
 }
@@ -36,11 +36,8 @@ export default function LoginPage() {
             const data = (await res.json().catch(() => null)) as LoginResp | null;
 
             if (!res.ok) {
-                if (isApiErr(data)) {
-                    setErr(`登录失败：${data.error}`);
-                } else {
-                    setErr(`登录失败：${res.status}`);
-                }
+                if (isApiErr(data)) setErr(`登录失败：${data.error}`);
+                else setErr(`登录失败：${res.status}`);
                 return;
             }
 
@@ -62,7 +59,6 @@ export default function LoginPage() {
             <div className="card" style={{ maxWidth: 520, margin: "0 auto" }}>
                 <div className="topbar">
                     <div className="brand">
-                        <div className="logo" />
                         <div className="title">
                             <strong>登录 AI Buddy</strong>
                             <span>进入你的长期陪伴对话</span>
@@ -70,30 +66,19 @@ export default function LoginPage() {
                     </div>
                 </div>
 
-                <div style={{ padding: 16, display: "grid", gap: 12 }}>
-                    <input
-                        className="input"
-                        value={username}
-                        onChange={(e) => setUsername(e.target.value)}
-                        placeholder="用户名（3-24，字母数字_-）"
-                    />
-                    <input
-                        className="input"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        placeholder="密码（≥6）"
-                        type="password"
-                    />
+                <div style={{ padding: 14, display: "grid", gap: 12 }}>
+                    <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="用户名（3-24，字母数字_-）" />
+                    <input className="input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码（≥6）" type="password" />
 
-                    {err ? <div style={{ color: "#fca5a5", fontSize: 13 }}>{err}</div> : null}
+                    {err ? <div className="noticeErr">{err}</div> : null}
 
-                    <button className="btn" onClick={onLogin} disabled={busy} style={{ padding: "12px 14px", borderRadius: 16 }}>
+                    <button className="btn primary" onClick={onLogin} disabled={busy} style={{ padding: "12px 14px" }}>
                         {busy ? "登录中…" : "登录"}
                     </button>
 
-                    <div style={{ fontSize: 13, color: "var(--muted)" }}>
+                    <div className="subtle" style={{ fontSize: 13 }}>
                         没有账号？去{" "}
-                        <a href="/register" style={{ fontWeight: 800 }}>
+                        <a href="/register" style={{ fontWeight: 900 }}>
                             注册
                         </a>
                     </div>
