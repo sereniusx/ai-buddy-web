@@ -6,9 +6,13 @@ export const metadata = {
     description: "Long-term companion chat",
 };
 
+export const viewport = {
+    width: "device-width",
+    initialScale: 1,
+    viewportFit: "cover",
+};
+
 function ThemeBoot() {
-    // 仅客户端运行：读取 localStorage 的 theme_id（system/day/night）
-    // 然后把 data-theme 写到 <html> 上，CSS 用它切换
     return (
         <script
             dangerouslySetInnerHTML={{

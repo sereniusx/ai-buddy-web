@@ -11,7 +11,7 @@
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 
-  /* Day defaults (will be overridden by [data-theme]) */
+  /* Day defaults */
   --bg: #ffffff;
   --panel: #ffffff;
   --panel2: #f7f7f7;
@@ -49,18 +49,21 @@ html[data-theme="night"] {
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
+
 body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
+  /* iOS safe area */
+  padding-bottom: env(safe-area-inset-bottom);
 }
+
+a { color: inherit; text-decoration: none; }
+button, input, select { font: inherit; }
 
 /* -------------------------
    Layout
 ------------------------- */
-a { color: inherit; text-decoration: none; }
-button, input, select { font: inherit; }
-
 .container {
   max-width: 780px;
   margin: 0 auto;
@@ -117,7 +120,13 @@ button, input, select { font: inherit; }
   text-overflow: ellipsis;
 }
 
-.actions { display: flex; gap: 10px; align-items: center; }
+.actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap; /* ✅ allow wrap on small screens */
+  justify-content: flex-end;
+}
 
 /* -------------------------
    Avatar + Pills
@@ -134,7 +143,7 @@ button, input, select { font: inherit; }
   flex: 0 0 auto;
 }
 .avatar img { width: 100%; height: 100%; object-fit: cover; }
-.avatar .fallback { font-weight: 800; font-size: 12px; color: var(--muted); }
+.avatar .fallback { font-weight: 900; font-size: 12px; color: var(--muted); }
 
 .pill {
   display: inline-flex;
@@ -158,7 +167,11 @@ button, input, select { font: inherit; }
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, color-mix(in oklab, var(--accent-cool) 40%, transparent), color-mix(in oklab, var(--accent-warm) 45%, transparent));
+  background: linear-gradient(
+          90deg,
+          color-mix(in oklab, var(--accent-cool) 40%, transparent),
+          color-mix(in oklab, var(--accent-warm) 45%, transparent)
+  );
   opacity: 0.22;
   pointer-events: none;
 }
@@ -176,9 +189,14 @@ button, input, select { font: inherit; }
   border-radius: 999px;
   cursor: pointer;
   transition: transform .08s ease, filter .15s ease, border-color .15s ease;
+  white-space: nowrap;
 }
-.btn:hover { filter: brightness(1.03); border-color: color-mix(in oklab, var(--border) 70%, var(--focus)); }
+.btn:hover {
+  filter: brightness(1.03);
+  border-color: color-mix(in oklab, var(--border) 70%, var(--focus));
+}
 .btn:active { transform: translateY(1px); }
+
 .btn.primary {
   background: var(--text);
   color: var(--bg);
@@ -227,6 +245,7 @@ button, input, select { font: inherit; }
   overflow: auto;
   padding: 14px;
   scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
 }
 
 .dayHint {
@@ -281,6 +300,7 @@ html[data-theme="night"] .bubble.user {
 .composer {
   border-top: 1px solid var(--border);
   padding: 12px;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom));
   display: flex;
   gap: 10px;
   background: linear-gradient(0deg, var(--panel2), transparent);
@@ -297,10 +317,7 @@ html[data-theme="night"] .bubble.user {
   transition: transform .08s ease, filter .15s ease;
 }
 .send:active { transform: translateY(1px); }
-.send:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
+.send:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* -------------------------
    Settings layout
@@ -336,4 +353,69 @@ html[data-theme="night"] .bubble.user {
   height: 1px;
   background: var(--border);
   margin: 12px 0;
+}
+
+/* =========================================================
+   ✅ Mobile Adaptation
+   只靠 CSS 就能让所有页面适配（因为复用了 class）
+========================================================= */
+@media (max-width: 520px) {
+  .container { padding: 12px 10px; }
+
+  .card { border-radius: 18px; }
+
+  /* 顶栏：允许两行布局 */
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .brand .title strong { font-size: 13px; }
+  .brand .title span { font-size: 12px; }
+
+  /* actions：铺满、可换行 */
+  .actions {
+    justify-content: flex-start;
+    gap: 8px;
+  }
+
+  /* 温度计胶囊：在手机上占一整行，更像“状态条” */
+  .pill.thermo {
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* 按钮变紧凑 */
+  .btn {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  /* Chat：更紧凑 + 高度更稳（避免键盘弹出时太挤） */
+  .chatWrap {
+    height: calc(100vh - 190px);
+    min-height: 520px;
+  }
+
+  .chatList { padding: 12px; }
+
+  .bubble {
+    max-width: 92%;
+    font-size: 14px;
+    padding: 10px 12px;
+    border-radius: 18px;
+  }
+
+  /* 输入框和发送按钮更适合手机 */
+  .composer { padding: 10px; gap: 8px; }
+  .input { padding: 12px 12px; border-radius: 16px; }
+  .send { width: 78px; border-radius: 16px; }
+}
+
+/* 更小屏（320px 级别）再压一次 */
+@media (max-width: 360px) {
+  .btn { padding: 7px 9px; }
+  .send { width: 70px; }
 }
