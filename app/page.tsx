@@ -261,7 +261,7 @@ export default function HomePage() {
   const isAdmin = (user as any)?.role === "admin";
 
   return (
-      <div className="container">
+      <div className="container" style={{ maxWidth: 1200 }}>
         <div className="card">
           <div className="topbar">
             <div className="brand" style={{ gap: 10 }}>

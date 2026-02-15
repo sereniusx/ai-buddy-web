@@ -52,7 +52,7 @@ function corsHeaders(req: Request, env?: Env) {
     }
 
     // 正常 whitelist 匹配
-    const allowedOrigin = allowSet.has(origin) ? origin : (allowList[0] || "null");
+    const allowedOrigin = allowSet.has(origin) ? origin : allowList[0] || "null";
 
     return {
         ...base,
@@ -60,7 +60,13 @@ function corsHeaders(req: Request, env?: Env) {
     };
 }
 
-function json(req: Request, env: Env, data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
+function json(
+    req: Request,
+    env: Env,
+    data: unknown,
+    status = 200,
+    extraHeaders: Record<string, string> = {}
+) {
     return new Response(JSON.stringify(data), {
         status,
         headers: {
@@ -98,7 +104,6 @@ function notFound(req: Request, env: Env) {
 
 // ✅ 宽类型：兼容 ArrayBuffer / SharedArrayBuffer / Uint8Array.buffer 等
 function base64urlEncode(buf: ArrayBufferLike) {
-    // Uint8Array 构造函数接受 ArrayBufferLike
     const bytes = new Uint8Array(buf);
     let s = "";
     for (const b of bytes) s += String.fromCharCode(b);
@@ -119,7 +124,6 @@ function base64urlDecode(s: string): ArrayBuffer {
     return bytes.buffer.slice(0);
 }
 
-
 async function sha256Hex(input: string) {
     const data = new TextEncoder().encode(input);
     const digest = await crypto.subtle.digest("SHA-256", data);
@@ -134,10 +138,18 @@ async function pbkdf2HashPassword(password: string, iterations = 100_000) {
     const iters = Math.max(MIN, Math.min(MAX, iterations));
 
     const salt = crypto.getRandomValues(new Uint8Array(16));
-    const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, [
-        "deriveBits",
-    ]);
-    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: iters }, keyMaterial, 256);
+    const keyMaterial = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(password),
+        "PBKDF2",
+        false,
+        ["deriveBits"]
+    );
+    const bits = await crypto.subtle.deriveBits(
+        { name: "PBKDF2", hash: "SHA-256", salt, iterations: iters },
+        keyMaterial,
+        256
+    );
     return `pbkdf2$${iters}$${base64urlEncode(salt.buffer)}$${base64urlEncode(bits)}`;
 }
 
@@ -148,7 +160,13 @@ async function pbkdf2VerifyPassword(password: string, stored: string) {
     const salt = base64urlDecode(parts[2]);
     const expected = parts[3];
 
-    const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+    const keyMaterial = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(password),
+        "PBKDF2",
+        false,
+        ["deriveBits"]
+    );
     const bits = await crypto.subtle.deriveBits(
         { name: "PBKDF2", hash: "SHA-256", salt: new Uint8Array(salt), iterations },
         keyMaterial,
@@ -196,7 +214,9 @@ function sqlPlaceholders(n: number) {
 }
 
 function clamp(n: number, min: number, max: number) {
-    return Math.max(min, Math.min(max, n));
+    const x = Number(n);
+    if (!Number.isFinite(x)) return min;
+    return Math.max(min, Math.min(max, x));
 }
 
 // -------------------------
@@ -207,7 +227,10 @@ async function deepseekStream(env: Env, payload: any) {
     const base = env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
     return fetch(`${base}/v1/chat/completions`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, "Content-Type": "application/json" },
+        headers: {
+            Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+            "Content-Type": "application/json",
+        },
         body: JSON.stringify(payload),
     });
 }
@@ -271,7 +294,7 @@ function formatDayInTz(tsMs: number, timeZone = DEFAULT_TZ) {
 
 function bondToTemp(bond: number) {
     // 36.0 ~ 42.0
-    const t = 36 + (Math.max(0, Math.min(100, bond)) * 0.06);
+    const t = 36 + Math.max(0, Math.min(100, bond)) * 0.06;
     return Math.round(t * 10) / 10;
 }
 
@@ -292,7 +315,12 @@ function stageCopy(stage: number) {
     }
 }
 
-async function upsertRelationshipDaily(env: Env, userId: string, tsMs: number, delta: { bond: number; trust: number; warmth: number; repair: number }) {
+async function upsertRelationshipDaily(
+    env: Env,
+    userId: string,
+    tsMs: number,
+    delta: { bond: number; trust: number; warmth: number; repair: number }
+) {
     const day = formatDayInTz(tsMs, DEFAULT_TZ);
     const t = nowMs();
 
@@ -536,7 +564,7 @@ function randomInviteCode() {
 }
 
 // -------------------------
-// Finalize: memory + relationship delta (+daily aggregation)
+// Finalize helpers
 // -------------------------
 
 async function deepseekJson(env: Env, messages: any[], temperature = 0.2) {
@@ -567,6 +595,30 @@ function clampInt(x: number, min: number, max: number) {
     return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
+/**
+ * ✅ DeepSeek 偶尔会返回 ```json ... ``` 或夹杂说明文字
+ * 这里做“兜底清洗”：尽量提取一个可 JSON.parse 的对象字符串
+ */
+function extractJsonObject(raw: string) {
+    const s = (raw || "").trim();
+
+    // 1) 去掉 ```json ... ``` 或 ``` ... ```
+    const fenced = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    const unfenced = fenced ? fenced[1].trim() : s;
+
+    // 2) 直接是 JSON
+    if (unfenced.startsWith("{") && unfenced.endsWith("}")) return unfenced;
+
+    // 3) 从文本中抓第一个 {...}
+    const first = unfenced.indexOf("{");
+    const last = unfenced.lastIndexOf("}");
+    if (first !== -1 && last !== -1 && last > first) {
+        return unfenced.slice(first, last + 1).trim();
+    }
+
+    return unfenced.trim();
+}
+
 async function finalizeMvp(env: Env, userId: string, threadId: string) {
     const recent = await env.DB.prepare(
         "SELECT id, role, content FROM messages WHERE user_id = ? AND thread_id = ? ORDER BY created_at DESC LIMIT 40"
@@ -585,7 +637,11 @@ async function finalizeMvp(env: Env, userId: string, threadId: string) {
         .join("\n");
 
     const prompt = [
-        { role: "system", content: "你是对话记忆整理器与关系评估器。只输出严格 JSON，不能输出任何多余文字。" },
+        {
+            role: "system",
+            content:
+                "你是对话记忆整理器与关系评估器。你必须只输出严格 JSON（不要 Markdown，不要 ``` 代码块，不要解释文字）。",
+        },
         {
             role: "user",
             content: `请基于对话抽取长期记忆，并评估本轮互动质量，输出 JSON：
@@ -631,9 +687,11 @@ ${convo}`,
 
     let data: any;
     try {
-        data = JSON.parse(r.text);
+        const cleaned = extractJsonObject(r.text);
+        data = JSON.parse(cleaned);
     } catch {
-        return { ok: false, error: "bad_json", raw: r.text };
+        const cleaned = extractJsonObject(r.text);
+        return { ok: false, error: "bad_json", raw: r.text, cleaned };
     }
 
     const updates = Array.isArray(data.profile_updates) ? data.profile_updates : [];
@@ -767,8 +825,13 @@ ${convo}`,
         .bind(nextBond, nextTrust, nextWarmth, nextRepair, stage, t, userId)
         .run();
 
-    // ✅ daily aggregation (方案B)
-    await upsertRelationshipDaily(env, userId, t, { bond: dBond, trust: dTrust, warmth: dWarmth, repair: dRepair });
+    // ✅ daily aggregation
+    await upsertRelationshipDaily(env, userId, t, {
+        bond: dBond,
+        trust: dTrust,
+        warmth: dWarmth,
+        repair: dRepair,
+    });
 
     // ✅ interaction_logs
     await env.DB.prepare(
@@ -828,7 +891,7 @@ export default {
             if (url.pathname === "/api/ping") return json(req, env, { ok: true, ts: nowMs() });
 
             // -------------------------
-            // Relationship: thermometer data (bond + temp + stage + trend)
+            // Relationship: thermometer data
             // GET /api/relationship?days=7
             // -------------------------
             if (url.pathname === "/api/relationship" && req.method === "GET") {
@@ -850,7 +913,6 @@ export default {
                     .bind(userId)
                     .first<any>();
 
-                // 最近 N 天（按 day 字符串倒序），前端自己决定怎么画
                 const trend = await env.DB.prepare(
                     "SELECT day, bond_delta, trust_delta, warmth_delta, repair_delta FROM relationship_daily " +
                     "WHERE user_id=? ORDER BY day DESC LIMIT ?"
@@ -874,7 +936,7 @@ export default {
                         copy: stageCopy(stage),
                         updated_at: Number(rel?.updated_at ?? 0),
                     },
-                    trend: (trend.results || []).reverse(), // 反转成 ASC，便于图表从左到右
+                    trend: (trend.results || []).reverse(),
                     companion: {
                         name: companion?.companion_name || "小伴",
                         avatar_url: companion?.companion_avatar_url || null,
@@ -1187,10 +1249,10 @@ export default {
 
                 const r = await env.DB.prepare(
                     `SELECT id, title, summary, happened_at, importance, kind, source_message_ids_json, created_at
-                     FROM memory_events
-                     WHERE ${where.join(" AND ")}
-                     ORDER BY created_at DESC, id DESC
-                     LIMIT ?`
+           FROM memory_events
+           WHERE ${where.join(" AND ")}
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`
                 )
                     .bind(...bind, limit + 1)
                     .all<any>();
@@ -1199,199 +1261,12 @@ export default {
                 const hasMore = rows.length > limit;
                 const items = hasMore ? rows.slice(0, limit) : rows;
 
-                const next_cursor = hasMore
-                    ? encodeCursor({ created_at: Number(items[items.length - 1].created_at), id: String(items[items.length - 1].id) })
-                    : null;
+                const next_cursor =
+                    hasMore && items.length
+                        ? encodeCursor({ created_at: Number(items[items.length - 1].created_at), id: String(items[items.length - 1].id) })
+                        : null;
 
                 return json(req, env, { ok: true, items, next_cursor });
-            }
-
-            // -------------------------
-            // ✅ Promote event -> shared_memories
-            // POST /api/memory/events/promote { event_id, kind }
-            // -------------------------
-            if (url.pathname === "/api/memory/events/promote" && req.method === "POST") {
-                const a = await requireAuth(env, req);
-                if (!a.ok) return a.resp;
-
-                const body = (await req.json().catch(() => null)) as any;
-                const eventId = String(body?.event_id || "").trim();
-                const kind = String(body?.kind || "").trim();
-
-                if (!eventId) return badRequest(req, env, "event_id required");
-                if (!(kind === "highlight" || kind === "milestone")) return badRequest(req, env, "kind must be highlight|milestone");
-
-                const ev = await env.DB.prepare(
-                    "SELECT id, title, summary, happened_at, importance, source_message_ids_json FROM memory_events WHERE user_id=? AND id=?"
-                )
-                    .bind(a.user.id, eventId)
-                    .first<any>();
-
-                if (!ev) return json(req, env, { ok: false, error: "event_not_found" }, 404);
-
-                const id = uuid();
-                const t = nowMs();
-
-                const title =
-                    (ev.title && String(ev.title).trim()) ||
-                    (String(ev.summary || "").trim().slice(0, 18) + (String(ev.summary || "").trim().length > 18 ? "…" : ""));
-
-                await env.DB.prepare(
-                    "INSERT INTO shared_memories (id, user_id, kind, title, summary, happened_at, source_message_ids_json, importance, created_at, updated_at) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                )
-                    .bind(
-                        id,
-                        a.user.id,
-                        kind,
-                        title,
-                        String(ev.summary || "").slice(0, 800),
-                        ev.happened_at ?? null,
-                        ev.source_message_ids_json || "[]",
-                        clamp(Number(ev.importance || 4), 1, 5),
-                        t,
-                        t
-                    )
-                    .run();
-
-                return json(req, env, { ok: true, id });
-            }
-
-            // -------------------------
-            // ✅ Gallery list
-            // GET /api/memory/gallery?limit=50&cursor=&kind=&pinned_first=1
-            // -------------------------
-            if (url.pathname === "/api/memory/gallery" && req.method === "GET") {
-                const a = await requireAuth(env, req);
-                if (!a.ok) return a.resp;
-
-                const limit = clamp(Number(url.searchParams.get("limit") || "50"), 1, 100);
-                const kind = String(url.searchParams.get("kind") || "").trim(); // highlight|milestone|""
-                const pinnedFirst = String(url.searchParams.get("pinned_first") || "1") === "1";
-                const cursor = decodeCursor(url.searchParams.get("cursor"));
-
-                const where: string[] = ["user_id=?"];
-                const bind: any[] = [a.user.id];
-
-                if (kind) {
-                    where.push("kind=?");
-                    bind.push(kind);
-                }
-
-                if (cursor) {
-                    where.push("(created_at < ? OR (created_at = ? AND id < ?))");
-                    bind.push(cursor.created_at, cursor.created_at, cursor.id);
-                }
-
-                const orderBy = pinnedFirst ? "pinned DESC, created_at DESC, id DESC" : "created_at DESC, id DESC";
-
-                const r = await env.DB.prepare(
-                    `SELECT id, kind, title, summary, happened_at, importance, pinned, tags_json, cover_emoji, updated_at, created_at, source_message_ids_json
-                     FROM shared_memories
-                     WHERE ${where.join(" AND ")}
-                     ORDER BY ${orderBy}
-                     LIMIT ?`
-                )
-                    .bind(...bind, limit + 1)
-                    .all<any>();
-
-                const rows = r.results || [];
-                const hasMore = rows.length > limit;
-                const items = hasMore ? rows.slice(0, limit) : rows;
-
-                const next_cursor = hasMore
-                    ? encodeCursor({ created_at: Number(items[items.length - 1].created_at), id: String(items[items.length - 1].id) })
-                    : null;
-
-                return json(req, env, { ok: true, items, next_cursor });
-            }
-
-            // -------------------------
-            // ✅ Gallery pin
-            // POST /api/memory/gallery/pin { id, pinned: 0|1 }
-            // -------------------------
-            if (url.pathname === "/api/memory/gallery/pin" && req.method === "POST") {
-                const a = await requireAuth(env, req);
-                if (!a.ok) return a.resp;
-
-                const body = (await req.json().catch(() => null)) as any;
-                const id = String(body?.id || "").trim();
-                const pinned = Number(body?.pinned);
-
-                if (!id) return badRequest(req, env, "id required");
-                if (!(pinned === 0 || pinned === 1)) return badRequest(req, env, "pinned must be 0|1");
-
-                const t = nowMs();
-                const r = await env.DB.prepare("UPDATE shared_memories SET pinned=?, updated_at=? WHERE user_id=? AND id=?")
-                    .bind(pinned, t, a.user.id, id)
-                    .run();
-
-                const changes = (r as any)?.meta?.changes ?? 0;
-                if (changes !== 1) return json(req, env, { ok: false, error: "not_found" }, 404);
-
-                return json(req, env, { ok: true, id, pinned });
-            }
-
-            // -------------------------
-            // ✅ Gallery delete (hard delete)
-            // POST /api/memory/gallery/delete { id }
-            // -------------------------
-            if (url.pathname === "/api/memory/gallery/delete" && req.method === "POST") {
-                const a = await requireAuth(env, req);
-                if (!a.ok) return a.resp;
-
-                const body = (await req.json().catch(() => null)) as any;
-                const id = String(body?.id || "").trim();
-                if (!id) return badRequest(req, env, "id required");
-
-                const r = await env.DB.prepare("DELETE FROM shared_memories WHERE user_id=? AND id=?").bind(a.user.id, id).run();
-                const changes = (r as any)?.meta?.changes ?? 0;
-
-                return json(req, env, { ok: true, deleted: changes === 1 });
-            }
-
-            // -------------------------
-            // ✅ Gallery detail (optional MVP+)
-            // GET /api/memory/gallery/detail?id=xxx
-            // -------------------------
-            if (url.pathname === "/api/memory/gallery/detail" && req.method === "GET") {
-                const a = await requireAuth(env, req);
-                if (!a.ok) return a.resp;
-
-                const id = String(url.searchParams.get("id") || "").trim();
-                if (!id) return badRequest(req, env, "id required");
-
-                const mem = await env.DB.prepare(
-                    "SELECT id, kind, title, summary, happened_at, importance, pinned, tags_json, cover_emoji, updated_at, created_at, source_message_ids_json " +
-                    "FROM shared_memories WHERE user_id=? AND id=?"
-                )
-                    .bind(a.user.id, id)
-                    .first<any>();
-
-                if (!mem) return json(req, env, { ok: false, error: "not_found" }, 404);
-
-                let sourceIds: string[] = [];
-                try {
-                    const arr = JSON.parse(mem.source_message_ids_json || "[]");
-                    if (Array.isArray(arr)) sourceIds = arr.map((x: any) => String(x)).filter(Boolean);
-                } catch {
-                    sourceIds = [];
-                }
-
-                let source_messages: any[] = [];
-                if (sourceIds.length) {
-                    const ph = sqlPlaceholders(sourceIds.length);
-                    const r = await env.DB.prepare(
-                        `SELECT id, role, content, created_at FROM messages
-                         WHERE user_id=? AND id IN (${ph})
-                         ORDER BY created_at ASC`
-                    )
-                        .bind(a.user.id, ...sourceIds)
-                        .all<any>();
-                    source_messages = r.results || [];
-                }
-
-                return json(req, env, { ok: true, memory: mem, source_messages });
             }
 
             // -------------------------
