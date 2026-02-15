@@ -251,6 +251,11 @@ export default function HomePage() {
                 设置
               </a>
 
+              {/* ✅ 新增：记忆画廊入口 */}
+              <a className="btn" href="/memories" title="打开记忆画廊">
+                🖼️ 记忆
+              </a>
+
               {isAdmin ? (
                   <a className="btn" href="/admin" title="管理员入口">
                     管理

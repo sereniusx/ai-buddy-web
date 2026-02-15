@@ -60,8 +60,6 @@ function corsHeaders(req: Request, env?: Env) {
     };
 }
 
-
-
 function json(req: Request, env: Env, data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
     return new Response(JSON.stringify(data), {
         status,
@@ -98,7 +96,9 @@ function notFound(req: Request, env: Env) {
 // Crypto helpers
 // -------------------------
 
-function base64urlEncode(buf: ArrayBuffer) {
+// ✅ 宽类型：兼容 ArrayBuffer / SharedArrayBuffer / Uint8Array.buffer 等
+function base64urlEncode(buf: ArrayBufferLike) {
+    // Uint8Array 构造函数接受 ArrayBufferLike
     const bytes = new Uint8Array(buf);
     let s = "";
     for (const b of bytes) s += String.fromCharCode(b);
@@ -106,14 +106,19 @@ function base64urlEncode(buf: ArrayBuffer) {
     return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-function base64urlDecode(s: string) {
+// ✅ 返回 ArrayBuffer（稳定、好用）
+function base64urlDecode(s: string): ArrayBuffer {
     const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
     const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + pad;
     const bin = atob(b64);
+
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes.buffer;
+
+    // ✅ 显式拷贝成 ArrayBuffer（避免 SharedArrayBuffer 推断）
+    return bytes.buffer.slice(0);
 }
+
 
 async function sha256Hex(input: string) {
     const data = new TextEncoder().encode(input);
@@ -161,6 +166,37 @@ function parseBearer(req: Request) {
     const h = req.headers.get("Authorization") || "";
     const m = h.match(/^Bearer\s+(.+)$/i);
     return m ? m[1].trim() : null;
+}
+
+// -------------------------
+// Cursor helpers (created_at + id)
+// -------------------------
+
+function encodeCursor(obj: { created_at: number; id: string }) {
+    const raw = JSON.stringify(obj);
+    const buf = new TextEncoder().encode(raw).buffer;
+    return base64urlEncode(buf);
+}
+
+function decodeCursor(cursor: string | null) {
+    if (!cursor) return null;
+    try {
+        const buf = base64urlDecode(cursor);
+        const raw = new TextDecoder().decode(buf);
+        const obj = JSON.parse(raw);
+        if (typeof obj?.created_at !== "number" || typeof obj?.id !== "string") return null;
+        return { created_at: obj.created_at as number, id: obj.id as string };
+    } catch {
+        return null;
+    }
+}
+
+function sqlPlaceholders(n: number) {
+    return Array.from({ length: n }, () => "?").join(",");
+}
+
+function clamp(n: number, min: number, max: number) {
+    return Math.max(min, Math.min(max, n));
 }
 
 // -------------------------
@@ -542,9 +578,10 @@ async function finalizeMvp(env: Env, userId: string, threadId: string) {
     const lastUserMsg = [...recentArr].find((m: any) => m.role === "user");
     const lastUserMessageId = lastUserMsg?.id ? String(lastUserMsg.id) : null;
 
+    // ✅ 让模型能选 source_message_ids：把 message id 带进去
     const convo = recentArr
         .reverse()
-        .map((m: any) => `${m.role}: ${m.content}`)
+        .map((m: any) => `[${m.id}] ${m.role}: ${m.content}`)
         .join("\n");
 
     const prompt = [
@@ -555,6 +592,16 @@ async function finalizeMvp(env: Env, userId: string, threadId: string) {
 {
   "profile_updates":[{"key":"user.xxx","value":"...","importance":1-5}],
   "events":[{"title":"一句话标题","summary":"发生了什么（短）","importance":1-5}],
+  "gallery_candidates":[
+    {
+      "kind":"highlight|milestone",
+      "title":"…",
+      "summary":"…",
+      "happened_at": unix_ms | null,
+      "importance":1-5,
+      "source_message_ids":[ "...", "..." ]
+    }
+  ],
   "relationship_delta": {"bond": -2..+4, "trust": -2..+3, "warmth": -2..+3, "repair": -2..+3}
 }
 规则：
@@ -562,6 +609,18 @@ async function finalizeMvp(env: Env, userId: string, threadId: string) {
 - trust/warmth/repair 同理，范围小一点。
 - 不要记录敏感隐私（账号、密码、精确地址、身份证号等）。
 - key 用简短路径，如 user.likes / user.schedule / user.goal / user.boundary。
+
+gallery_candidates 规则（重要）：
+- 每次最多 0~2 条；宁可少，不要凑数。
+- kind 只能是 "highlight" 或 "milestone"：
+  - highlight：温暖/有趣/有意义的小瞬间，像回忆，不像日志。
+  - milestone：只有明显共同节点/关系推进/承诺/重要决定/第一次达成，才输出；否则不要输出 milestone。
+- title：像相册标题，10~24 字，具体可读，不要“日志风”。
+- summary：1~3 句自然中文，像人写的回忆描述；不要列表、不要字段名口吻。
+- happened_at：有明确时间点才填 unix_ms，否则 null。
+- importance：1~5（milestone 通常 4~5）。
+- source_message_ids：从最近对话里挑 1~4 条关键 message id（必须来自上面带 [] 的 id，不能编造）。
+
 对话：
 ${convo}`,
         },
@@ -579,11 +638,13 @@ ${convo}`,
 
     const updates = Array.isArray(data.profile_updates) ? data.profile_updates : [];
     const events = Array.isArray(data.events) ? data.events : [];
+    const candidates = Array.isArray(data.gallery_candidates) ? data.gallery_candidates : [];
     const delta = data.relationship_delta || {};
 
     const t = nowMs();
     let updCount = 0;
     let evtUpsertCount = 0;
+    let candUpsertCount = 0;
 
     // profile upsert
     for (const u of updates) {
@@ -633,6 +694,54 @@ ${convo}`,
         evtUpsertCount++;
     }
 
+    // ✅ gallery_candidates -> memory_events（候选池）
+    for (const c of candidates.slice(0, 2)) {
+        if (!c?.summary) continue;
+
+        const kind = String(c.kind || "").trim();
+        if (!(kind === "highlight" || kind === "milestone")) continue;
+
+        const title = c.title ? String(c.title).slice(0, 80) : null;
+        const summary = String(c.summary).slice(0, 800);
+        const importance = clampInt(c.importance ?? 3, 1, 5);
+
+        let happenedAt: number | null = null;
+        if (typeof c.happened_at === "number" && Number.isFinite(c.happened_at)) happenedAt = Math.trunc(c.happened_at);
+
+        let sourceIds: string[] = [];
+        if (Array.isArray(c.source_message_ids)) {
+            sourceIds = c.source_message_ids.map((x: any) => String(x)).filter(Boolean).slice(0, 4);
+        }
+        const sourceJson = JSON.stringify(sourceIds);
+
+        const fp = await sha256Hex(`gallery|${kind}|${title || ""}|${summary.replace(/\s+/g, " ").trim().slice(0, 220)}`);
+        const id = uuid();
+
+        // 需要 memory_events 有 kind + source_message_ids_json 两列
+        await env.DB.prepare(
+            "INSERT INTO memory_events (id, user_id, fingerprint, title, summary, happened_at, importance, ttl_days, created_at, kind, source_message_ids_json) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 180, ?, ?, ?) " +
+            "ON CONFLICT(user_id, fingerprint) DO UPDATE SET " +
+            "  title = COALESCE(excluded.title, title), " +
+            "  summary = CASE " +
+            "    WHEN length(summary) >= 780 THEN summary " +
+            "    WHEN instr(summary, excluded.summary) > 0 THEN summary " +
+            "    ELSE summary || '；' || excluded.summary " +
+            "  END, " +
+            "  happened_at = COALESCE(excluded.happened_at, happened_at), " +
+            "  importance = MAX(importance, excluded.importance), " +
+            "  kind = COALESCE(excluded.kind, kind), " +
+            "  source_message_ids_json = CASE " +
+            "    WHEN excluded.source_message_ids_json IS NULL OR excluded.source_message_ids_json = '[]' THEN source_message_ids_json " +
+            "    ELSE excluded.source_message_ids_json " +
+            "  END"
+        )
+            .bind(id, userId, fp, title, summary, happenedAt, importance, t, kind, sourceJson)
+            .run();
+
+        candUpsertCount++;
+    }
+
     // relationship delta
     const rel = await env.DB.prepare("SELECT bond, trust, warmth, repair FROM relationship_state WHERE user_id = ?")
         .bind(userId)
@@ -661,7 +770,7 @@ ${convo}`,
     // ✅ daily aggregation (方案B)
     await upsertRelationshipDaily(env, userId, t, { bond: dBond, trust: dTrust, warmth: dWarmth, repair: dRepair });
 
-    // ✅ interaction_logs (你表里有，用起来：方便后续 debug/可视化)
+    // ✅ interaction_logs
     await env.DB.prepare(
         "INSERT INTO interaction_logs (id, user_id, thread_id, last_user_message_id, interaction_score_json, delta_json, created_at) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -671,7 +780,12 @@ ${convo}`,
             userId,
             threadId,
             lastUserMessageId,
-            JSON.stringify({ profile_updates: updates, events, model_delta: data.relationship_delta ?? null }),
+            JSON.stringify({
+                profile_updates: updates,
+                events,
+                gallery_candidates: candidates,
+                model_delta: data.relationship_delta ?? null,
+            }),
             JSON.stringify({ bond: dBond, trust: dTrust, warmth: dWarmth, repair: dRepair }),
             t
         )
@@ -681,6 +795,7 @@ ${convo}`,
         ok: true,
         profile_updates: updCount,
         events_upserted: evtUpsertCount,
+        gallery_candidates_upserted: candUpsertCount,
         relationship: {
             bond: nextBond,
             trust: nextTrust,
@@ -1039,6 +1154,247 @@ export default {
             }
 
             // -------------------------
+            // ✅ Memory Events list (candidates pool)
+            // GET /api/memory/events?limit=50&cursor=&days=&min_importance=
+            // -------------------------
+            if (url.pathname === "/api/memory/events" && req.method === "GET") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const limit = clamp(Number(url.searchParams.get("limit") || "50"), 1, 100);
+                const days = Number(url.searchParams.get("days") || "0");
+                const minImportance = clamp(Number(url.searchParams.get("min_importance") || "0"), 0, 5);
+                const cursor = decodeCursor(url.searchParams.get("cursor"));
+
+                const where: string[] = ["user_id=?"];
+                const bind: any[] = [a.user.id];
+
+                if (minImportance > 0) {
+                    where.push("importance >= ?");
+                    bind.push(minImportance);
+                }
+
+                if (days > 0) {
+                    const since = nowMs() - days * 86400_000;
+                    where.push("(happened_at IS NOT NULL AND happened_at >= ?)");
+                    bind.push(since);
+                }
+
+                if (cursor) {
+                    where.push("(created_at < ? OR (created_at = ? AND id < ?))");
+                    bind.push(cursor.created_at, cursor.created_at, cursor.id);
+                }
+
+                const r = await env.DB.prepare(
+                    `SELECT id, title, summary, happened_at, importance, kind, source_message_ids_json, created_at
+                     FROM memory_events
+                     WHERE ${where.join(" AND ")}
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?`
+                )
+                    .bind(...bind, limit + 1)
+                    .all<any>();
+
+                const rows = r.results || [];
+                const hasMore = rows.length > limit;
+                const items = hasMore ? rows.slice(0, limit) : rows;
+
+                const next_cursor = hasMore
+                    ? encodeCursor({ created_at: Number(items[items.length - 1].created_at), id: String(items[items.length - 1].id) })
+                    : null;
+
+                return json(req, env, { ok: true, items, next_cursor });
+            }
+
+            // -------------------------
+            // ✅ Promote event -> shared_memories
+            // POST /api/memory/events/promote { event_id, kind }
+            // -------------------------
+            if (url.pathname === "/api/memory/events/promote" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const body = (await req.json().catch(() => null)) as any;
+                const eventId = String(body?.event_id || "").trim();
+                const kind = String(body?.kind || "").trim();
+
+                if (!eventId) return badRequest(req, env, "event_id required");
+                if (!(kind === "highlight" || kind === "milestone")) return badRequest(req, env, "kind must be highlight|milestone");
+
+                const ev = await env.DB.prepare(
+                    "SELECT id, title, summary, happened_at, importance, source_message_ids_json FROM memory_events WHERE user_id=? AND id=?"
+                )
+                    .bind(a.user.id, eventId)
+                    .first<any>();
+
+                if (!ev) return json(req, env, { ok: false, error: "event_not_found" }, 404);
+
+                const id = uuid();
+                const t = nowMs();
+
+                const title =
+                    (ev.title && String(ev.title).trim()) ||
+                    (String(ev.summary || "").trim().slice(0, 18) + (String(ev.summary || "").trim().length > 18 ? "…" : ""));
+
+                await env.DB.prepare(
+                    "INSERT INTO shared_memories (id, user_id, kind, title, summary, happened_at, source_message_ids_json, importance, created_at, updated_at) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                    .bind(
+                        id,
+                        a.user.id,
+                        kind,
+                        title,
+                        String(ev.summary || "").slice(0, 800),
+                        ev.happened_at ?? null,
+                        ev.source_message_ids_json || "[]",
+                        clamp(Number(ev.importance || 4), 1, 5),
+                        t,
+                        t
+                    )
+                    .run();
+
+                return json(req, env, { ok: true, id });
+            }
+
+            // -------------------------
+            // ✅ Gallery list
+            // GET /api/memory/gallery?limit=50&cursor=&kind=&pinned_first=1
+            // -------------------------
+            if (url.pathname === "/api/memory/gallery" && req.method === "GET") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const limit = clamp(Number(url.searchParams.get("limit") || "50"), 1, 100);
+                const kind = String(url.searchParams.get("kind") || "").trim(); // highlight|milestone|""
+                const pinnedFirst = String(url.searchParams.get("pinned_first") || "1") === "1";
+                const cursor = decodeCursor(url.searchParams.get("cursor"));
+
+                const where: string[] = ["user_id=?"];
+                const bind: any[] = [a.user.id];
+
+                if (kind) {
+                    where.push("kind=?");
+                    bind.push(kind);
+                }
+
+                if (cursor) {
+                    where.push("(created_at < ? OR (created_at = ? AND id < ?))");
+                    bind.push(cursor.created_at, cursor.created_at, cursor.id);
+                }
+
+                const orderBy = pinnedFirst ? "pinned DESC, created_at DESC, id DESC" : "created_at DESC, id DESC";
+
+                const r = await env.DB.prepare(
+                    `SELECT id, kind, title, summary, happened_at, importance, pinned, tags_json, cover_emoji, updated_at, created_at, source_message_ids_json
+                     FROM shared_memories
+                     WHERE ${where.join(" AND ")}
+                     ORDER BY ${orderBy}
+                     LIMIT ?`
+                )
+                    .bind(...bind, limit + 1)
+                    .all<any>();
+
+                const rows = r.results || [];
+                const hasMore = rows.length > limit;
+                const items = hasMore ? rows.slice(0, limit) : rows;
+
+                const next_cursor = hasMore
+                    ? encodeCursor({ created_at: Number(items[items.length - 1].created_at), id: String(items[items.length - 1].id) })
+                    : null;
+
+                return json(req, env, { ok: true, items, next_cursor });
+            }
+
+            // -------------------------
+            // ✅ Gallery pin
+            // POST /api/memory/gallery/pin { id, pinned: 0|1 }
+            // -------------------------
+            if (url.pathname === "/api/memory/gallery/pin" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const body = (await req.json().catch(() => null)) as any;
+                const id = String(body?.id || "").trim();
+                const pinned = Number(body?.pinned);
+
+                if (!id) return badRequest(req, env, "id required");
+                if (!(pinned === 0 || pinned === 1)) return badRequest(req, env, "pinned must be 0|1");
+
+                const t = nowMs();
+                const r = await env.DB.prepare("UPDATE shared_memories SET pinned=?, updated_at=? WHERE user_id=? AND id=?")
+                    .bind(pinned, t, a.user.id, id)
+                    .run();
+
+                const changes = (r as any)?.meta?.changes ?? 0;
+                if (changes !== 1) return json(req, env, { ok: false, error: "not_found" }, 404);
+
+                return json(req, env, { ok: true, id, pinned });
+            }
+
+            // -------------------------
+            // ✅ Gallery delete (hard delete)
+            // POST /api/memory/gallery/delete { id }
+            // -------------------------
+            if (url.pathname === "/api/memory/gallery/delete" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const body = (await req.json().catch(() => null)) as any;
+                const id = String(body?.id || "").trim();
+                if (!id) return badRequest(req, env, "id required");
+
+                const r = await env.DB.prepare("DELETE FROM shared_memories WHERE user_id=? AND id=?").bind(a.user.id, id).run();
+                const changes = (r as any)?.meta?.changes ?? 0;
+
+                return json(req, env, { ok: true, deleted: changes === 1 });
+            }
+
+            // -------------------------
+            // ✅ Gallery detail (optional MVP+)
+            // GET /api/memory/gallery/detail?id=xxx
+            // -------------------------
+            if (url.pathname === "/api/memory/gallery/detail" && req.method === "GET") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const id = String(url.searchParams.get("id") || "").trim();
+                if (!id) return badRequest(req, env, "id required");
+
+                const mem = await env.DB.prepare(
+                    "SELECT id, kind, title, summary, happened_at, importance, pinned, tags_json, cover_emoji, updated_at, created_at, source_message_ids_json " +
+                    "FROM shared_memories WHERE user_id=? AND id=?"
+                )
+                    .bind(a.user.id, id)
+                    .first<any>();
+
+                if (!mem) return json(req, env, { ok: false, error: "not_found" }, 404);
+
+                let sourceIds: string[] = [];
+                try {
+                    const arr = JSON.parse(mem.source_message_ids_json || "[]");
+                    if (Array.isArray(arr)) sourceIds = arr.map((x: any) => String(x)).filter(Boolean);
+                } catch {
+                    sourceIds = [];
+                }
+
+                let source_messages: any[] = [];
+                if (sourceIds.length) {
+                    const ph = sqlPlaceholders(sourceIds.length);
+                    const r = await env.DB.prepare(
+                        `SELECT id, role, content, created_at FROM messages
+                         WHERE user_id=? AND id IN (${ph})
+                         ORDER BY created_at ASC`
+                    )
+                        .bind(a.user.id, ...sourceIds)
+                        .all<any>();
+                    source_messages = r.results || [];
+                }
+
+                return json(req, env, { ok: true, memory: mem, source_messages });
+            }
+
+            // -------------------------
             // Chat SSE
             // -------------------------
             if (url.pathname === "/api/chat" && req.method === "POST") {
@@ -1136,3 +1492,11 @@ export default {
         }
     },
 };
+
+/**
+ * ✅ 需要你执行的最小 DB 变更（只新增 2 列，满足 kind + 回溯 message ids）
+ *
+ * ALTER TABLE memory_events ADD COLUMN kind TEXT;
+ * ALTER TABLE memory_events ADD COLUMN source_message_ids_json TEXT NOT NULL DEFAULT '[]';
+ * CREATE INDEX IF NOT EXISTS idx_mem_events_user_kind ON memory_events(user_id, kind);
+ */
