@@ -4,5 +4,5 @@ compatibility_date = "2026-02-15"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "ai_buddy_db"
-database_id = "607933e5-fc94-4e16-ac7d-9df66eb699cb"
+database_name = "ai-buddy-db"
+database_id = "3edd2058-a1dc-4c08-80cf-274a58d848ab"
