@@ -22,11 +22,12 @@ export default function Home() {
     setMessages((m) => [...m, { role: "user", content: text }, { role: "assistant", content: "" }]);
     setStreaming(true);
 
-    const res = await fetch("https://ai-buddy-api.serenius.workers.dev", {
+    const res = await fetch("https://ai-buddy-api.serenius.workers.dev/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: text }),
     });
+
 
     if (!res.ok || !res.body) {
       setStreaming(false);
