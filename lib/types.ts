@@ -25,9 +25,11 @@ export type CompanionProfile = {
     updated_at: number;
 };
 
+export type InviteStatus = "active" | "used" | "disabled";
+
 export type Invite = {
     code: string;
-    status: "active" | "used" | "disabled";
+    status: InviteStatus;
     created_at: number;
     used_at?: number | null;
     note?: string | null;

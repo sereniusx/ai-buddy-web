@@ -4,13 +4,20 @@ export interface Env {
     DB: D1Database;
     DEEPSEEK_API_KEY: string;
     DEEPSEEK_BASE_URL?: string;
+
+    // ✅ 万能邀请码：等于该值时，注册直接放行（不消耗 invites）
+    MASTER_INVITE_CODE?: string;
 }
 
 type Role = "admin" | "user";
 type UserStatus = "active" | "disabled";
 type InviteStatus = "active" | "used" | "disabled";
 
-function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
+function json(
+    data: unknown,
+    status = 200,
+    extraHeaders: Record<string, string> = {}
+) {
     return new Response(JSON.stringify(data), {
         status,
         headers: {
@@ -137,7 +144,7 @@ function parseBearer(req: Request) {
 }
 
 // -------------------------
-// DeepSeek SSE helpers (your stable version)
+// DeepSeek SSE helpers
 // -------------------------
 
 async function deepseekStream(env: Env, payload: any) {
@@ -206,7 +213,9 @@ async function getUserByUsername(env: Env, username: string) {
 }
 
 async function countAdmins(env: Env) {
-    const row = await env.DB.prepare("SELECT COUNT(1) as c FROM users WHERE role = 'admin'").first<any>();
+    const row = await env.DB.prepare(
+        "SELECT COUNT(1) as c FROM users WHERE role = 'admin'"
+    ).first<any>();
     return Number(row?.c || 0);
 }
 
@@ -225,15 +234,21 @@ async function createUser(env: Env, username: string, passwordHash: string, role
         .run();
 
     // create default rows
-    await env.DB.prepare("INSERT INTO user_settings (user_id, display_name, avatar_url, theme_id, bubble_style, updated_at) VALUES (?, ?, NULL, 'default', 'default', ?)")
+    await env.DB.prepare(
+        "INSERT INTO user_settings (user_id, display_name, avatar_url, theme_id, bubble_style, updated_at) VALUES (?, ?, NULL, 'default', 'default', ?)"
+    )
         .bind(id, username, t)
         .run();
 
-    await env.DB.prepare("INSERT INTO companion_profile (user_id, companion_name, companion_avatar_url, tone_style, updated_at) VALUES (?, '小伴', NULL, 'warm', ?)")
+    await env.DB.prepare(
+        "INSERT INTO companion_profile (user_id, companion_name, companion_avatar_url, tone_style, updated_at) VALUES (?, '小伴', NULL, 'warm', ?)"
+    )
         .bind(id, t)
         .run();
 
-    await env.DB.prepare("INSERT INTO relationship_state (user_id, bond, trust, warmth, repair, stage, updated_at) VALUES (?, 0, 0, 0, 0, 0, ?)")
+    await env.DB.prepare(
+        "INSERT INTO relationship_state (user_id, bond, trust, warmth, repair, stage, updated_at) VALUES (?, 0, 0, 0, 0, 0, ?)"
+    )
         .bind(id, t)
         .run();
 
@@ -298,7 +313,9 @@ async function createSession(env: Env, userId: string) {
 }
 
 async function getThreadId(env: Env, userId: string) {
-    const row = await env.DB.prepare("SELECT id FROM threads WHERE user_id = ?").bind(userId).first<any>();
+    const row = await env.DB.prepare("SELECT id FROM threads WHERE user_id = ?")
+        .bind(userId)
+        .first<any>();
     if (row?.id) return String(row.id);
 
     // should not happen because we create it on user creation, but keep safe:
@@ -310,7 +327,14 @@ async function getThreadId(env: Env, userId: string) {
     return tid;
 }
 
-async function saveMessage(env: Env, userId: string, threadId: string, role: "user" | "assistant" | "system", content: string, meta?: any) {
+async function saveMessage(
+    env: Env,
+    userId: string,
+    threadId: string,
+    role: "user" | "assistant" | "system",
+    content: string,
+    meta?: any
+) {
     await env.DB.prepare(
         "INSERT INTO messages (id, user_id, thread_id, role, content, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
@@ -319,9 +343,15 @@ async function saveMessage(env: Env, userId: string, threadId: string, role: "us
 }
 
 async function loadContext(env: Env, userId: string, threadId: string) {
-    const companion = await env.DB.prepare("SELECT * FROM companion_profile WHERE user_id = ?").bind(userId).first<any>();
-    const settings = await env.DB.prepare("SELECT * FROM user_settings WHERE user_id = ?").bind(userId).first<any>();
-    const rel = await env.DB.prepare("SELECT * FROM relationship_state WHERE user_id = ?").bind(userId).first<any>();
+    const companion = await env.DB.prepare("SELECT * FROM companion_profile WHERE user_id = ?")
+        .bind(userId)
+        .first<any>();
+    const settings = await env.DB.prepare("SELECT * FROM user_settings WHERE user_id = ?")
+        .bind(userId)
+        .first<any>();
+    const rel = await env.DB.prepare("SELECT * FROM relationship_state WHERE user_id = ?")
+        .bind(userId)
+        .first<any>();
 
     const mem = await env.DB.prepare(
         "SELECT key, value FROM memory_profile WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20"
@@ -372,7 +402,6 @@ function buildSystemPrompt(companion: any, rel: any, memoryText: string) {
 
     const bond = Number(rel?.bond ?? 0);
     const stage = stageFromBond(bond);
-
     const stageText = ["初识", "熟悉", "亲近", "默契", "深陪伴"][stage] || "初识";
 
     const system = `你是我的AI陪伴伙伴，名字叫「${name}」。你必须始终自称为「${name}」。
@@ -396,11 +425,18 @@ ${memoryText}
 }
 
 // -------------------------
-// Invites (admin) + register logic
+// Invites + register logic
 // -------------------------
 
+function isMasterInvite(env: Env, code: string) {
+    const master = (env.MASTER_INVITE_CODE || "").trim();
+    return master.length > 0 && code === master;
+}
+
 async function consumeInviteOrFail(env: Env, code: string) {
-    const invite = await env.DB.prepare("SELECT code, status FROM invites WHERE code = ?").bind(code).first<any>();
+    const invite = await env.DB.prepare("SELECT code, status FROM invites WHERE code = ?")
+        .bind(code)
+        .first<any>();
     if (!invite) return { ok: false as const, error: "invite_not_found" };
     if (invite.status !== "active") return { ok: false as const, error: "invite_not_active" };
     return { ok: true as const };
@@ -415,7 +451,6 @@ async function markInviteUsed(env: Env, code: string, usedByUserId: string) {
         .bind(usedByUserId, t, code)
         .run();
 
-    // D1 returns { success: true, meta: { changes } }
     const changes = (r as any)?.meta?.changes ?? 0;
     return changes === 1;
 }
@@ -443,10 +478,7 @@ function randomInviteCode() {
 }
 
 // -------------------------
-// Finalize (MVP runnable version)
-// - memory extraction + dedup write
-// - relationship +1
-// Later we can upgrade to: interaction_score, milestones, shared memories, commitments.
+// Finalize (MVP)
 // -------------------------
 
 async function deepseekJson(env: Env, messages: any[], temperature = 0.2) {
@@ -543,25 +575,27 @@ ${convo}`,
         const fp = await sha256Hex(`event|${title || ""}|${summary}`);
         const id = uuid();
 
-        await env.DB.prepare(
+        const rr = await env.DB.prepare(
             "INSERT INTO memory_events (id, user_id, fingerprint, title, summary, happened_at, importance, ttl_days, created_at) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?, 180, ?) " +
             "ON CONFLICT(user_id, fingerprint) DO NOTHING"
         )
             .bind(id, userId, fp, title, summary, t, importance, t)
             .run();
-        evtCount++;
+
+        const changes = (rr as any)?.meta?.changes ?? 0;
+        if (changes === 1) evtCount++;
     }
 
     // intimacy MVP: +1 bond
-    const rel = await env.DB.prepare("SELECT bond FROM relationship_state WHERE user_id = ?").bind(userId).first<any>();
+    const rel = await env.DB.prepare("SELECT bond FROM relationship_state WHERE user_id = ?")
+        .bind(userId)
+        .first<any>();
     const cur = Number(rel?.bond || 0);
     const next = Math.min(100, cur + 1);
     const stage = stageFromBond(next);
 
-    await env.DB.prepare(
-        "UPDATE relationship_state SET bond = ?, stage = ?, updated_at = ? WHERE user_id = ?"
-    )
+    await env.DB.prepare("UPDATE relationship_state SET bond = ?, stage = ?, updated_at = ? WHERE user_id = ?")
         .bind(next, stage, t, userId)
         .run();
 
@@ -582,7 +616,7 @@ export default {
         if (url.pathname === "/api/ping") return json({ ok: true, ts: nowMs() });
 
         // -------------------------
-        // Auth: register (invite required, first user becomes admin)
+        // Auth: register
         // POST /api/auth/register { username, password, invite_code }
         // -------------------------
         if (url.pathname === "/api/auth/register" && req.method === "POST") {
@@ -599,11 +633,16 @@ export default {
             const existing = await getUserByUsername(env, username);
             if (existing) return json({ ok: false, error: "username_taken" }, 409);
 
-            // invite must exist + active
-            const inviteCheck = await consumeInviteOrFail(env, inviteCode);
-            if (!inviteCheck.ok) return json({ ok: false, error: inviteCheck.error }, 403);
+            // ✅ 是否万能邀请码（绕过 invites）
+            const bypass = isMasterInvite(env, inviteCode);
 
-            // bootstrap: if users count == 0, this user becomes admin (solves chicken egg)
+            // ✅ 非万能邀请码才检查 invites 表
+            if (!bypass) {
+                const inviteCheck = await consumeInviteOrFail(env, inviteCode);
+                if (!inviteCheck.ok) return json({ ok: false, error: inviteCheck.error }, 403);
+            }
+
+            // bootstrap: if users count == 0, this user becomes admin
             const userCount = await countUsers(env);
             const role: Role = userCount === 0 ? "admin" : "user";
 
@@ -618,14 +657,16 @@ export default {
                 return json({ ok: false, error: "db_error", detail: String(e?.message || e) }, 500);
             }
 
-            // Mark invite used (atomic conditional update)
-            const usedOk = await markInviteUsed(env, inviteCode, newUserId);
-            if (!usedOk) {
-                // If invite was raced, disable user to be safe (simple rollback strategy)
-                await env.DB.prepare("UPDATE users SET status='disabled', updated_at=? WHERE id=?")
-                    .bind(nowMs(), newUserId)
-                    .run();
-                return json({ ok: false, error: "invite_race_failed" }, 409);
+            // ✅ 非万能邀请码才 mark used
+            if (!bypass) {
+                const usedOk = await markInviteUsed(env, inviteCode, newUserId);
+                if (!usedOk) {
+                    // rollback strategy: disable created user
+                    await env.DB.prepare("UPDATE users SET status='disabled', updated_at=? WHERE id=?")
+                        .bind(nowMs(), newUserId)
+                        .run();
+                    return json({ ok: false, error: "invite_race_failed" }, 409);
+                }
             }
 
             // Create session
@@ -636,6 +677,7 @@ export default {
                 user: { id: newUserId, username, role },
                 token: session.token,
                 expires_at: session.expiresAt,
+                invite_bypassed: bypass, // 可选：方便前端/你自己调试
             });
         }
 
@@ -679,9 +721,6 @@ export default {
 
         // -------------------------
         // Admin: invites list/create/disable
-        // GET  /api/admin/invites?status=active|used|disabled
-        // POST /api/admin/invites { note? }  -> create one code
-        // POST /api/admin/invites/disable { code }
         // -------------------------
         if (url.pathname === "/api/admin/invites" && req.method === "GET") {
             const a = await requireAuth(env, req);
@@ -758,9 +797,7 @@ export default {
         }
 
         // -------------------------
-        // Settings: update user / companion (supports uploaded avatar_url)
-        // POST /api/settings/user { display_name?, avatar_url?, theme_id?, bubble_style? }
-        // POST /api/settings/companion { companion_name?, companion_avatar_url?, tone_style? }
+        // Settings: update user / companion
         // -------------------------
         if (url.pathname === "/api/settings/user" && req.method === "POST") {
             const a = await requireAuth(env, req);
@@ -804,9 +841,7 @@ export default {
         }
 
         // -------------------------
-        // Memory delete (first stage only)
-        // POST /api/memory/profile/delete { key }
-        // POST /api/memory/events/delete { id }
+        // Memory delete
         // -------------------------
         if (url.pathname === "/api/memory/profile/delete" && req.method === "POST") {
             const a = await requireAuth(env, req);
