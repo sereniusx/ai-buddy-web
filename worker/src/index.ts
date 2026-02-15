@@ -19,33 +19,48 @@ type MsgRole = "user" | "assistant" | "system";
  */
 function corsHeaders(req: Request, env?: Env) {
     const origin = req.headers.get("Origin") || "";
-
     const rawAllow = (env?.ALLOWED_ORIGINS || "").trim();
-    if (rawAllow) {
-        const allow = new Set(
-            rawAllow
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean)
-        );
-        const allowedOrigin = allow.has(origin) ? origin : (allow.values().next().value || "");
-        return {
-            "Access-Control-Allow-Origin": allowedOrigin || "null",
-            Vary: "Origin",
-            "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type,Authorization",
-            "Access-Control-Max-Age": "86400",
-        };
-    }
 
-    return {
-        "Access-Control-Allow-Origin": origin || "*",
+    const base = {
         Vary: "Origin",
-        "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type,Authorization",
         "Access-Control-Max-Age": "86400",
     };
+
+    // 没设白名单：直接反射（开发最方便）
+    if (!rawAllow) {
+        return {
+            ...base,
+            "Access-Control-Allow-Origin": origin || "*",
+        };
+    }
+
+    const allowList = rawAllow
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    const allowSet = new Set(allowList);
+
+    // ✅ 关键：Origin 为空或 "null"（Safari/某些 WebView）时，回退到白名单第一个
+    if (!origin || origin === "null") {
+        return {
+            ...base,
+            "Access-Control-Allow-Origin": allowList[0] || "*",
+        };
+    }
+
+    // 正常 whitelist 匹配
+    const allowedOrigin = allowSet.has(origin) ? origin : (allowList[0] || "null");
+
+    return {
+        ...base,
+        "Access-Control-Allow-Origin": allowedOrigin,
+    };
 }
+
+
 
 function json(req: Request, env: Env, data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
     return new Response(JSON.stringify(data), {

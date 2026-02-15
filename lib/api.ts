@@ -11,7 +11,12 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
     if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     if (token) headers.set("Authorization", `Bearer ${token}`);
 
-    const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+    const res = await fetch(`${API_BASE}${path}`, {
+        ...init,
+        headers,
+        credentials: "omit",
+        cache: "no-store",
+    });
 
     if (res.status === 401) {
         logout();
