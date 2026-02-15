@@ -57,6 +57,10 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // ✅ 新增：Finalize 按钮状态
+  const [finalizeBusy, setFinalizeBusy] = useState(false);
+  const [finalizeMsg, setFinalizeMsg] = useState<string | null>(null);
+
   const [rel, setRel] = useState<RelResp | null>(null);
   const [relErr, setRelErr] = useState<string | null>(null);
 
@@ -126,6 +130,7 @@ export default function HomePage() {
   function clearChat() {
     setMsgs([{ id: uid(), role: "system", content: "会话已清空（仅清空本地显示）。你想从哪里继续？", created_at: now() }]);
     setErr(null);
+    setFinalizeMsg(null);
     setText("");
   }
 
@@ -200,6 +205,46 @@ export default function HomePage() {
     }
   }
 
+  // ✅ 新增：手动触发 finalize，生成候选记忆碎片
+  async function runFinalize() {
+    if (finalizeBusy) return;
+    setFinalizeMsg(null);
+    setFinalizeBusy(true);
+
+    try {
+      const res = await apiFetch("/api/finalize", { method: "POST" });
+      const j = (await res.json().catch(() => null)) as any;
+
+      if (!res.ok) {
+        setFinalizeMsg(j?.error ? `Finalize 失败：${j.error}` : `Finalize 失败：${res.status}`);
+        if (res.status === 401) router.replace("/login");
+        return;
+      }
+
+      const up = Number(j?.profile_updates ?? 0);
+      const ev = Number(j?.events_upserted ?? 0);
+      const bondNext = j?.relationship?.bond;
+
+      const tip =
+          `✅ 已整理：候选记忆 ${ev} 条，资料更新 ${up} 条` +
+          (typeof bondNext === "number" ? `；亲密度 ${bondNext.toFixed(1)}` : "");
+      setFinalizeMsg(tip);
+
+      // 可选：顺便刷新温度计
+      try {
+        const r2 = await apiFetch("/api/relationship?days=7");
+        if (r2.ok) {
+          const d2 = (await r2.json().catch(() => null)) as any;
+          setRel(d2 as RelResp);
+        }
+      } catch {}
+    } catch (e: any) {
+      setFinalizeMsg(`Finalize 网络错误：${String(e?.message || e)}`);
+    } finally {
+      setFinalizeBusy(false);
+    }
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -251,10 +296,20 @@ export default function HomePage() {
                 设置
               </a>
 
-              {/* ✅ 新增：记忆画廊入口 */}
+              {/* ✅ 记忆画廊入口 */}
               <a className="btn" href="/memories" title="打开记忆画廊">
                 🖼️ 记忆
               </a>
+
+              {/* ✅ 新增：Finalize */}
+              <button
+                  className="btn"
+                  onClick={runFinalize}
+                  disabled={finalizeBusy}
+                  title="整理本轮对话：生成候选记忆碎片"
+              >
+                {finalizeBusy ? "整理…" : "Finalize"}
+              </button>
 
               {isAdmin ? (
                   <a className="btn" href="/admin" title="管理员入口">
@@ -275,6 +330,13 @@ export default function HomePage() {
           {relErr ? (
               <div style={{ padding: "10px 14px" }}>
                 <div className="noticeErr">⚠️ {relErr}</div>
+              </div>
+          ) : null}
+
+          {/* ✅ Finalize 提示 */}
+          {finalizeMsg ? (
+              <div style={{ padding: "10px 14px" }}>
+                <div className="noticeErr">✨ {finalizeMsg}</div>
               </div>
           ) : null}
 
