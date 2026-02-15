@@ -31,6 +31,19 @@ function fallbackLetter(s?: string) {
   return t.slice(0, 2).toUpperCase();
 }
 
+function getCurrentTheme(): "day" | "night" {
+  const t = document.documentElement.getAttribute("data-theme");
+  return t === "night" ? "night" : "day";
+}
+
+function setTheme(theme: "day" | "night") {
+  document.documentElement.setAttribute("data-theme", theme);
+  try {
+    // 主页快速切换：直接锁定 day/night
+    localStorage.setItem("ai_buddy_theme", theme);
+  } catch {}
+}
+
 export default function HomePage() {
   const router = useRouter();
   const user = useMemo(() => getSavedUser(), []);
@@ -51,9 +64,24 @@ export default function HomePage() {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const autoScrollRef = useRef(true);
 
+  const [theme, setThemeState] = useState<"day" | "night">("day");
+
   useEffect(() => {
     if (!token || !user) router.replace("/login");
   }, [token, user, router]);
+
+  // 初始化主题状态（从 html[data-theme] 读取）
+  useEffect(() => {
+    try {
+      setThemeState(getCurrentTheme());
+    } catch {}
+  }, []);
+
+  function toggleTheme() {
+    const next = theme === "night" ? "day" : "night";
+    setTheme(next);
+    setThemeState(next);
+  }
 
   // 拉关系状态（温度计）
   useEffect(() => {
@@ -132,7 +160,9 @@ export default function HomePage() {
         const j = await res.json().catch(() => null);
         const msg = j?.error ? `请求失败：${j.error}` : `请求失败：${res.status}`;
         setErr(msg);
-        setMsgs((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: "（网络或服务异常，稍后再试。）" } : m)));
+        setMsgs((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, content: "（网络或服务异常，稍后再试。）" } : m))
+        );
         return;
       }
 
@@ -162,9 +192,6 @@ export default function HomePage() {
           setMsgs((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: m.content + data } : m)));
         }
       }
-
-      // 可选：你现在 finalize 是手动触发的。这里不强行自动触发，保持你现有流程。
-      // 如果你希望“每轮对话结束自动更新温度计”，可以在这里调用 /api/finalize，然后再刷新 /api/relationship。
     } catch (e: any) {
       setErr(`网络错误：${String(e?.message || e)}`);
       setMsgs((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: "（网络错误，稍后再试。）" } : m)));
@@ -186,13 +213,19 @@ export default function HomePage() {
   const bond = typeof rel?.relationship?.bond === "number" ? rel.relationship.bond : 0;
   const temp = typeof rel?.relationship?.temp === "number" ? rel.relationship.temp : undefined;
 
+  const isAdmin = (user as any)?.role === "admin";
+
   return (
       <div className="container">
         <div className="card">
           <div className="topbar">
             <div className="brand" style={{ gap: 10 }}>
               <div className="avatar" title="陪伴体头像">
-                {companionAvatar ? <img src={companionAvatar} alt="companion" /> : <div className="fallback">{fallbackLetter(companionName)}</div>}
+                {companionAvatar ? (
+                    <img src={companionAvatar} alt="companion" />
+                ) : (
+                    <div className="fallback">{fallbackLetter(companionName)}</div>
+                )}
               </div>
 
               <div className="title">
@@ -202,10 +235,27 @@ export default function HomePage() {
             </div>
 
             <div className="actions">
+              {/* 温度计（去设置） */}
               <a className="pill thermo" href="/settings" title="去设置：主题 / 头像 / 温度计">
                 <strong>{temp ? `${temp.toFixed(1)}℃` : `${bond.toFixed(1)}`}</strong>
                 <small style={{ marginLeft: 6 }}>{temp ? "关系温度" : "亲密度"}</small>
               </a>
+
+              {/* 主题切换 */}
+              <button className="btn" onClick={toggleTheme} title="切换日间/夜间模式">
+                {theme === "night" ? "☀️ 日间" : "🌙 夜间"}
+              </button>
+
+              {/* 快速入口 */}
+              <a className="btn" href="/settings" title="打开设置">
+                设置
+              </a>
+
+              {isAdmin ? (
+                  <a className="btn" href="/admin" title="管理员入口">
+                    管理
+                  </a>
+              ) : null}
 
               <button className="btn" onClick={clearChat} title="清空本地消息显示">
                 清空
