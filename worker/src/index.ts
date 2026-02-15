@@ -5,24 +5,54 @@ export interface Env {
     DEEPSEEK_API_KEY: string;
     DEEPSEEK_BASE_URL?: string;
 
-    // ✅ 万能邀请码：等于该值时，注册直接放行（不消耗 invites）
     MASTER_INVITE_CODE?: string;
+
+    // "https://ai-buddy-web.pages.dev,http://localhost:3000"
+    ALLOWED_ORIGINS?: string;
 }
 
 type Role = "admin" | "user";
-type UserStatus = "active" | "disabled";
-type InviteStatus = "active" | "used" | "disabled";
+type MsgRole = "user" | "assistant" | "system";
 
-function json(
-    data: unknown,
-    status = 200,
-    extraHeaders: Record<string, string> = {}
-) {
+/**
+ * ✅ CORS: 反射 Origin + 可选白名单
+ */
+function corsHeaders(req: Request, env?: Env) {
+    const origin = req.headers.get("Origin") || "";
+
+    const rawAllow = (env?.ALLOWED_ORIGINS || "").trim();
+    if (rawAllow) {
+        const allow = new Set(
+            rawAllow
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean)
+        );
+        const allowedOrigin = allow.has(origin) ? origin : (allow.values().next().value || "");
+        return {
+            "Access-Control-Allow-Origin": allowedOrigin || "null",
+            Vary: "Origin",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+            "Access-Control-Max-Age": "86400",
+        };
+    }
+
+    return {
+        "Access-Control-Allow-Origin": origin || "*",
+        Vary: "Origin",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type,Authorization",
+        "Access-Control-Max-Age": "86400",
+    };
+}
+
+function json(req: Request, env: Env, data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
     return new Response(JSON.stringify(data), {
         status,
         headers: {
             "Content-Type": "application/json; charset=utf-8",
-            ...corsHeaders(),
+            ...corsHeaders(req, env),
             ...extraHeaders,
         },
     });
@@ -36,32 +66,21 @@ function uuid() {
     return crypto.randomUUID();
 }
 
-function corsHeaders() {
-    return {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    };
+function badRequest(req: Request, env: Env, msg: string) {
+    return json(req, env, { ok: false, error: msg }, 400);
 }
-
-function badRequest(msg: string) {
-    return json({ ok: false, error: msg }, 400);
+function unauthorized(req: Request, env: Env, msg = "unauthorized") {
+    return json(req, env, { ok: false, error: msg }, 401);
 }
-
-function unauthorized(msg = "unauthorized") {
-    return json({ ok: false, error: msg }, 401);
+function forbidden(req: Request, env: Env, msg = "forbidden") {
+    return json(req, env, { ok: false, error: msg }, 403);
 }
-
-function forbidden(msg = "forbidden") {
-    return json({ ok: false, error: msg }, 403);
-}
-
-function notFound() {
-    return json({ ok: false, error: "not found" }, 404);
+function notFound(req: Request, env: Env) {
+    return json(req, env, { ok: false, error: "not found" }, 404);
 }
 
 // -------------------------
-// Crypto helpers (PBKDF2 + SHA256 token hash)
+// Crypto helpers
 // -------------------------
 
 function base64urlEncode(buf: ArrayBuffer) {
@@ -88,23 +107,22 @@ async function sha256Hex(input: string) {
     return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function pbkdf2HashPassword(password: string, iterations = 120_000) {
+async function pbkdf2HashPassword(password: string, iterations = 100_000) {
+    // ✅ Cloudflare Workers WebCrypto: PBKDF2 iterations 不能超过 100000
+    const MAX = 100_000;
+    const MIN = 50_000;
+    const iters = Math.max(MIN, Math.min(MAX, iterations));
+
     const salt = crypto.getRandomValues(new Uint8Array(16));
-    const keyMaterial = await crypto.subtle.importKey(
-        "raw",
-        new TextEncoder().encode(password),
-        "PBKDF2",
-        false,
-        ["deriveBits"]
-    );
+    const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, [
+        "deriveBits",
+    ]);
     const bits = await crypto.subtle.deriveBits(
-        { name: "PBKDF2", hash: "SHA-256", salt, iterations },
+        { name: "PBKDF2", hash: "SHA-256", salt, iterations: iters },
         keyMaterial,
         256
     );
-    const saltB64 = base64urlEncode(salt.buffer);
-    const hashB64 = base64urlEncode(bits);
-    return `pbkdf2$${iterations}$${saltB64}$${hashB64}`;
+    return `pbkdf2$${iters}$${base64urlEncode(salt.buffer)}$${base64urlEncode(bits)}`;
 }
 
 async function pbkdf2VerifyPassword(password: string, stored: string) {
@@ -114,22 +132,15 @@ async function pbkdf2VerifyPassword(password: string, stored: string) {
     const salt = base64urlDecode(parts[2]);
     const expected = parts[3];
 
-    const keyMaterial = await crypto.subtle.importKey(
-        "raw",
-        new TextEncoder().encode(password),
-        "PBKDF2",
-        false,
-        ["deriveBits"]
-    );
-
+    const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, [
+        "deriveBits",
+    ]);
     const bits = await crypto.subtle.deriveBits(
         { name: "PBKDF2", hash: "SHA-256", salt: new Uint8Array(salt), iterations },
         keyMaterial,
         256
     );
-
-    const actual = base64urlEncode(bits);
-    return actual === expected;
+    return base64urlEncode(bits) === expected;
 }
 
 function randomToken() {
@@ -151,21 +162,11 @@ async function deepseekStream(env: Env, payload: any) {
     const base = env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
     return fetch(`${base}/v1/chat/completions`, {
         method: "POST",
-        headers: {
-            Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
-            "Content-Type": "application/json",
-        },
+        headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify(payload),
     });
 }
 
-/**
- * Robustly parse upstream SSE:
- * - Buffer partial chunks
- * - Split by '\n'
- * - Only process lines beginning with 'data:'
- * - Stop at [DONE]
- */
 async function* parseUpstreamSSE(stream: ReadableStream<Uint8Array>) {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
@@ -174,6 +175,7 @@ async function* parseUpstreamSSE(stream: ReadableStream<Uint8Array>) {
     while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+
         buffer += decoder.decode(value, { stream: true });
 
         let idx: number;
@@ -203,20 +205,11 @@ function isLikelyGibberish(s: string) {
 }
 
 // -------------------------
-// DB helpers: auth + thread + messages
+// DB helpers
 // -------------------------
 
 async function getUserByUsername(env: Env, username: string) {
-    return env.DB.prepare("SELECT * FROM users WHERE username = ?")
-        .bind(username)
-        .first<any>();
-}
-
-async function countAdmins(env: Env) {
-    const row = await env.DB.prepare(
-        "SELECT COUNT(1) as c FROM users WHERE role = 'admin'"
-    ).first<any>();
-    return Number(row?.c || 0);
+    return env.DB.prepare("SELECT * FROM users WHERE username = ?").bind(username).first<any>();
 }
 
 async function countUsers(env: Env) {
@@ -227,13 +220,13 @@ async function countUsers(env: Env) {
 async function createUser(env: Env, username: string, passwordHash: string, role: Role) {
     const id = uuid();
     const t = nowMs();
+
     await env.DB.prepare(
         "INSERT INTO users (id, username, password_hash, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)"
     )
         .bind(id, username, passwordHash, role, t, t)
         .run();
 
-    // create default rows
     await env.DB.prepare(
         "INSERT INTO user_settings (user_id, display_name, avatar_url, theme_id, bubble_style, updated_at) VALUES (?, ?, NULL, 'default', 'default', ?)"
     )
@@ -252,7 +245,6 @@ async function createUser(env: Env, username: string, passwordHash: string, role
         .bind(id, t)
         .run();
 
-    // create single thread
     const threadId = uuid();
     await env.DB.prepare("INSERT INTO threads (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)")
         .bind(threadId, id, t, t)
@@ -263,7 +255,7 @@ async function createUser(env: Env, username: string, passwordHash: string, role
 
 async function requireAuth(env: Env, req: Request) {
     const token = parseBearer(req);
-    if (!token) return { ok: false as const, resp: unauthorized("missing bearer token") };
+    if (!token) return { ok: false as const, resp: unauthorized(req, env, "missing bearer token") };
 
     const tokenHash = await sha256Hex(token);
     const t = nowMs();
@@ -275,23 +267,16 @@ async function requireAuth(env: Env, req: Request) {
         .bind(tokenHash)
         .first<any>();
 
-    if (!sess) return { ok: false as const, resp: unauthorized("invalid session") };
-    if (sess.revoked_at) return { ok: false as const, resp: unauthorized("session revoked") };
-    if (Number(sess.expires_at) < t) return { ok: false as const, resp: unauthorized("session expired") };
-    if (sess.status !== "active") return { ok: false as const, resp: forbidden("user disabled") };
+    if (!sess) return { ok: false as const, resp: unauthorized(req, env, "invalid session") };
+    if (sess.revoked_at) return { ok: false as const, resp: unauthorized(req, env, "session revoked") };
+    if (Number(sess.expires_at) < t) return { ok: false as const, resp: unauthorized(req, env, "session expired") };
+    if (sess.status !== "active") return { ok: false as const, resp: forbidden(req, env, "user disabled") };
 
-    // touch last_seen
-    await env.DB.prepare("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?")
-        .bind(t, tokenHash)
-        .run();
+    await env.DB.prepare("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?").bind(t, tokenHash).run();
 
     return {
         ok: true as const,
-        user: {
-            id: sess.user_id as string,
-            username: sess.username as string,
-            role: sess.role as Role,
-        },
+        user: { id: sess.user_id as string, username: sess.username as string, role: sess.role as Role },
         tokenHash,
     };
 }
@@ -301,7 +286,7 @@ async function createSession(env: Env, userId: string) {
     const tokenHash = await sha256Hex(raw);
     const id = uuid();
     const t = nowMs();
-    const expiresAt = t + 1000 * 60 * 60 * 24 * 30; // 30 days
+    const expiresAt = t + 1000 * 60 * 60 * 24 * 30;
 
     await env.DB.prepare(
         "INSERT INTO sessions (id, user_id, token_hash, created_at, last_seen_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, NULL)"
@@ -313,12 +298,9 @@ async function createSession(env: Env, userId: string) {
 }
 
 async function getThreadId(env: Env, userId: string) {
-    const row = await env.DB.prepare("SELECT id FROM threads WHERE user_id = ?")
-        .bind(userId)
-        .first<any>();
+    const row = await env.DB.prepare("SELECT id FROM threads WHERE user_id = ?").bind(userId).first<any>();
     if (row?.id) return String(row.id);
 
-    // should not happen because we create it on user creation, but keep safe:
     const tid = uuid();
     const t = nowMs();
     await env.DB.prepare("INSERT INTO threads (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)")
@@ -327,14 +309,7 @@ async function getThreadId(env: Env, userId: string) {
     return tid;
 }
 
-async function saveMessage(
-    env: Env,
-    userId: string,
-    threadId: string,
-    role: "user" | "assistant" | "system",
-    content: string,
-    meta?: any
-) {
+async function saveMessage(env: Env, userId: string, threadId: string, role: MsgRole, content: string, meta?: any) {
     await env.DB.prepare(
         "INSERT INTO messages (id, user_id, thread_id, role, content, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
@@ -343,15 +318,8 @@ async function saveMessage(
 }
 
 async function loadContext(env: Env, userId: string, threadId: string) {
-    const companion = await env.DB.prepare("SELECT * FROM companion_profile WHERE user_id = ?")
-        .bind(userId)
-        .first<any>();
-    const settings = await env.DB.prepare("SELECT * FROM user_settings WHERE user_id = ?")
-        .bind(userId)
-        .first<any>();
-    const rel = await env.DB.prepare("SELECT * FROM relationship_state WHERE user_id = ?")
-        .bind(userId)
-        .first<any>();
+    const companion = await env.DB.prepare("SELECT * FROM companion_profile WHERE user_id = ?").bind(userId).first<any>();
+    const rel = await env.DB.prepare("SELECT * FROM relationship_state WHERE user_id = ?").bind(userId).first<any>();
 
     const mem = await env.DB.prepare(
         "SELECT key, value FROM memory_profile WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20"
@@ -360,9 +328,7 @@ async function loadContext(env: Env, userId: string, threadId: string) {
         .all<any>();
 
     const memoryText =
-        mem?.results?.length
-            ? mem.results.map((m: any) => `- ${m.key}: ${m.value}`).join("\n")
-            : "- （暂无）";
+        mem?.results?.length ? mem.results.map((m: any) => `- ${m.key}: ${m.value}`).join("\n") : "- （暂无）";
 
     const recent = await env.DB.prepare(
         "SELECT role, content FROM messages WHERE user_id = ? AND thread_id = ? ORDER BY created_at DESC LIMIT 24"
@@ -375,11 +341,10 @@ async function loadContext(env: Env, userId: string, threadId: string) {
         return true;
     });
 
-    return { companion, settings, rel, memoryText, recentAsc };
+    return { companion, rel, memoryText, recentAsc };
 }
 
 function stageFromBond(bond: number) {
-    // 0..100 -> 0..4
     if (bond < 15) return 0;
     if (bond < 35) return 1;
     if (bond < 60) return 2;
@@ -404,7 +369,7 @@ function buildSystemPrompt(companion: any, rel: any, memoryText: string) {
     const stage = stageFromBond(bond);
     const stageText = ["初识", "熟悉", "亲近", "默契", "深陪伴"][stage] || "初识";
 
-    const system = `你是我的AI陪伴伙伴，名字叫「${name}」。你必须始终自称为「${name}」。
+    return `你是我的AI陪伴伙伴，名字叫「${name}」。你必须始终自称为「${name}」。
 人设：${persona}
 
 聊天规则（必须遵守）：
@@ -420,8 +385,6 @@ ${memoryText}
 关系状态：
 - 亲密度：${bond.toFixed(1)}/100
 - 阶段：${stageText}`;
-
-    return system;
 }
 
 // -------------------------
@@ -434,19 +397,16 @@ function isMasterInvite(env: Env, code: string) {
 }
 
 async function consumeInviteOrFail(env: Env, code: string) {
-    const invite = await env.DB.prepare("SELECT code, status FROM invites WHERE code = ?")
-        .bind(code)
-        .first<any>();
+    const invite = await env.DB.prepare("SELECT code, status FROM invites WHERE code = ?").bind(code).first<any>();
     if (!invite) return { ok: false as const, error: "invite_not_found" };
     if (invite.status !== "active") return { ok: false as const, error: "invite_not_active" };
     return { ok: true as const };
 }
 
-// note: consumption must be done after user created (to fill used_by_user_id). We do conditional update.
 async function markInviteUsed(env: Env, code: string, usedByUserId: string) {
     const t = nowMs();
     const r = await env.DB.prepare(
-        "UPDATE invites SET status = 'used', used_by_user_id = ?, used_at = ? WHERE code = ? AND status = 'active'"
+        "UPDATE invites SET status='used', used_by_user_id=?, used_at=? WHERE code=? AND status='active'"
     )
         .bind(usedByUserId, t, code)
         .run();
@@ -456,20 +416,16 @@ async function markInviteUsed(env: Env, code: string, usedByUserId: string) {
 }
 
 function isValidUsername(u: string) {
-    // simple: 3~24, alnum + _ -
     return /^[a-zA-Z0-9_-]{3,24}$/.test(u);
 }
-
 function isValidPassword(p: string) {
     return typeof p === "string" && p.length >= 6 && p.length <= 72;
 }
-
 function isValidInvite(code: string) {
     return typeof code === "string" && code.length >= 4 && code.length <= 64;
 }
 
 function randomInviteCode() {
-    // 10 chars
     const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     const b = crypto.getRandomValues(new Uint8Array(10));
     let out = "";
@@ -478,7 +434,7 @@ function randomInviteCode() {
 }
 
 // -------------------------
-// Finalize (MVP)
+// Finalize: memory + relationship delta
 // -------------------------
 
 async function deepseekJson(env: Env, messages: any[], temperature = 0.2) {
@@ -486,10 +442,7 @@ async function deepseekJson(env: Env, messages: any[], temperature = 0.2) {
     const base = env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
     const res = await fetch(`${base}/v1/chat/completions`, {
         method: "POST",
-        headers: {
-            Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
-            "Content-Type": "application/json",
-        },
+        headers: { Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify(payload),
     });
     if (!res.ok) {
@@ -499,6 +452,17 @@ async function deepseekJson(env: Env, messages: any[], temperature = 0.2) {
     const j = await res.json<any>();
     const text = j?.choices?.[0]?.message?.content ?? "";
     return { ok: true as const, text };
+}
+
+function clamp01to100(x: number) {
+    if (!Number.isFinite(x)) return 0;
+    return Math.max(0, Math.min(100, x));
+}
+
+function clampInt(x: number, min: number, max: number) {
+    const n = Number(x);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
 async function finalizeMvp(env: Env, userId: string, threadId: string) {
@@ -514,17 +478,19 @@ async function finalizeMvp(env: Env, userId: string, threadId: string) {
         .join("\n");
 
     const prompt = [
-        { role: "system", content: "你是对话记忆整理器。只输出严格 JSON，不能输出任何多余文字。" },
+        { role: "system", content: "你是对话记忆整理器与关系评估器。只输出严格 JSON，不能输出任何多余文字。" },
         {
             role: "user",
-            content: `请从下面对话中抽取值得长期记忆的信息，输出 JSON：
+            content: `请基于对话抽取长期记忆，并评估本轮互动质量，输出 JSON：
 {
   "profile_updates":[{"key":"user.xxx","value":"...","importance":1-5}],
-  "events":[{"title":"一句话标题","summary":"发生了什么（短）","importance":1-5}]
+  "events":[{"title":"一句话标题","summary":"发生了什么（短）","importance":1-5}],
+  "relationship_delta": {"bond": -2..+4, "trust": -2..+3, "warmth": -2..+3, "repair": -2..+3}
 }
-原则：
-- 只保留对未来对话有价值的信息；
-- 不要记录敏感隐私（账号、密码、精确地址、身份证号等）；
+规则：
+- bond：亲密度变化（默认 0~+2；明显深入/互相理解可到 +3/+4；冲突/冒犯可为负）
+- trust/warmth/repair 同理，范围小一点。
+- 不要记录敏感隐私（账号、密码、精确地址、身份证号等）。
 - key 用简短路径，如 user.likes / user.schedule / user.goal / user.boundary。
 对话：
 ${convo}`,
@@ -543,17 +509,18 @@ ${convo}`,
 
     const updates = Array.isArray(data.profile_updates) ? data.profile_updates : [];
     const events = Array.isArray(data.events) ? data.events : [];
+    const delta = data.relationship_delta || {};
 
     const t = nowMs();
     let updCount = 0;
-    let evtCount = 0;
+    let evtUpsertCount = 0;
 
-    // profile upsert (UNIQUE(user_id, key))
+    // profile upsert
     for (const u of updates) {
         if (!u?.key || !u?.value) continue;
         const k = String(u.key).slice(0, 120);
         const v = String(u.value).slice(0, 800);
-        const importance = Number(u.importance || 3);
+        const importance = clampInt(u.importance ?? 3, 1, 5);
         const id = uuid();
 
         await env.DB.prepare(
@@ -561,45 +528,83 @@ ${convo}`,
             "VALUES (?, ?, ?, ?, 0.7, ?, ?, ?) " +
             "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value, importance=excluded.importance, updated_at=excluded.updated_at"
         )
-            .bind(id, userId, k, v, Math.max(1, Math.min(5, importance)), t, t)
+            .bind(id, userId, k, v, importance, t, t)
             .run();
+
         updCount++;
     }
 
-    // events dedup by fingerprint
+    // events: conflict merge (避免重复)
     for (const e of events) {
         if (!e?.summary) continue;
+
         const title = e.title ? String(e.title).slice(0, 80) : null;
         const summary = String(e.summary).slice(0, 800);
-        const importance = Math.max(1, Math.min(5, Number(e.importance || 3)));
-        const fp = await sha256Hex(`event|${title || ""}|${summary}`);
+        const importance = clampInt(e.importance ?? 3, 1, 5);
+
+        // fingerprint：用 title+summary 的“稳健 hash”（同一事件多次表达更容易合并）
+        // 这里先用 summary 本身；你将来可以做更强的 normalize
+        const fp = await sha256Hex(`event|${title || ""}|${summary.replace(/\s+/g, " ").trim().slice(0, 220)}`);
         const id = uuid();
 
-        const rr = await env.DB.prepare(
+        await env.DB.prepare(
             "INSERT INTO memory_events (id, user_id, fingerprint, title, summary, happened_at, importance, ttl_days, created_at) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?, 180, ?) " +
-            "ON CONFLICT(user_id, fingerprint) DO NOTHING"
+            "ON CONFLICT(user_id, fingerprint) DO UPDATE SET " +
+            "  title = COALESCE(excluded.title, title), " +
+            "  summary = CASE " +
+            "    WHEN length(summary) >= 780 THEN summary " +
+            "    WHEN instr(summary, excluded.summary) > 0 THEN summary " +
+            "    ELSE summary || '；' || excluded.summary " +
+            "  END, " +
+            "  importance = MAX(importance, excluded.importance)"
         )
             .bind(id, userId, fp, title, summary, t, importance, t)
             .run();
 
-        const changes = (rr as any)?.meta?.changes ?? 0;
-        if (changes === 1) evtCount++;
+        evtUpsertCount++;
     }
 
-    // intimacy MVP: +1 bond
-    const rel = await env.DB.prepare("SELECT bond FROM relationship_state WHERE user_id = ?")
+    // relationship delta
+    const rel = await env.DB.prepare("SELECT bond, trust, warmth, repair FROM relationship_state WHERE user_id = ?")
         .bind(userId)
         .first<any>();
-    const cur = Number(rel?.bond || 0);
-    const next = Math.min(100, cur + 1);
-    const stage = stageFromBond(next);
 
-    await env.DB.prepare("UPDATE relationship_state SET bond = ?, stage = ?, updated_at = ? WHERE user_id = ?")
-        .bind(next, stage, t, userId)
+    const curBond = Number(rel?.bond || 0);
+    const curTrust = Number(rel?.trust || 0);
+    const curWarmth = Number(rel?.warmth || 0);
+    const curRepair = Number(rel?.repair || 0);
+
+    const dBond = clampInt(delta?.bond ?? 0, -2, 4);
+    const dTrust = clampInt(delta?.trust ?? 0, -2, 3);
+    const dWarmth = clampInt(delta?.warmth ?? 0, -2, 3);
+    const dRepair = clampInt(delta?.repair ?? 0, -2, 3);
+
+    const nextBond = clamp01to100(curBond + dBond);
+    const nextTrust = clamp01to100(curTrust + dTrust);
+    const nextWarmth = clamp01to100(curWarmth + dWarmth);
+    const nextRepair = clamp01to100(curRepair + dRepair);
+    const stage = stageFromBond(nextBond);
+
+    await env.DB.prepare(
+        "UPDATE relationship_state SET bond=?, trust=?, warmth=?, repair=?, stage=?, updated_at=? WHERE user_id=?"
+    )
+        .bind(nextBond, nextTrust, nextWarmth, nextRepair, stage, t, userId)
         .run();
 
-    return { ok: true, profile_updates: updCount, events: evtCount, bond: next, stage };
+    return {
+        ok: true,
+        profile_updates: updCount,
+        events_upserted: evtUpsertCount,
+        relationship: {
+            bond: nextBond,
+            trust: nextTrust,
+            warmth: nextWarmth,
+            repair: nextRepair,
+            stage,
+            delta: { bond: dBond, trust: dTrust, warmth: dWarmth, repair: dRepair },
+        },
+    };
 }
 
 // -------------------------
@@ -608,374 +613,385 @@ ${convo}`,
 
 export default {
     async fetch(req: Request, env: Env): Promise<Response> {
-        const url = new URL(req.url);
+        try {
+            const url = new URL(req.url);
 
-        if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders() });
-
-        // health
-        if (url.pathname === "/api/ping") return json({ ok: true, ts: nowMs() });
-
-        // -------------------------
-        // Auth: register
-        // POST /api/auth/register { username, password, invite_code }
-        // -------------------------
-        if (url.pathname === "/api/auth/register" && req.method === "POST") {
-            const body = (await req.json().catch(() => null)) as any;
-            const username = String(body?.username || "").trim();
-            const password = String(body?.password || "");
-            const inviteCode = String(body?.invite_code || "").trim();
-
-            if (!isValidUsername(username)) return badRequest("invalid username (3~24, a-zA-Z0-9_-)");
-            if (!isValidPassword(password)) return badRequest("invalid password (6~72)");
-            if (!isValidInvite(inviteCode)) return badRequest("invite_code required");
-
-            // username unique
-            const existing = await getUserByUsername(env, username);
-            if (existing) return json({ ok: false, error: "username_taken" }, 409);
-
-            // ✅ 是否万能邀请码（绕过 invites）
-            const bypass = isMasterInvite(env, inviteCode);
-
-            // ✅ 非万能邀请码才检查 invites 表
-            if (!bypass) {
-                const inviteCheck = await consumeInviteOrFail(env, inviteCode);
-                if (!inviteCheck.ok) return json({ ok: false, error: inviteCheck.error }, 403);
+            // preflight
+            if (req.method === "OPTIONS") {
+                return new Response(null, { status: 204, headers: corsHeaders(req, env) });
             }
 
-            // bootstrap: if users count == 0, this user becomes admin
-            const userCount = await countUsers(env);
-            const role: Role = userCount === 0 ? "admin" : "user";
+            // health
+            if (url.pathname === "/api/ping") return json(req, env, { ok: true, ts: nowMs() });
 
-            const passwordHash = await pbkdf2HashPassword(password);
+            // -------------------------
+            // Thread: get messages
+            // GET /api/thread/messages?limit=120
+            // -------------------------
+            if (url.pathname === "/api/thread/messages" && req.method === "GET") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
 
-            // Create user + default rows + thread
-            let newUserId = "";
-            try {
-                const created = await createUser(env, username, passwordHash, role);
-                newUserId = created.id;
-            } catch (e: any) {
-                return json({ ok: false, error: "db_error", detail: String(e?.message || e) }, 500);
+                const limit = Math.max(10, Math.min(200, Number(url.searchParams.get("limit") || "80")));
+                const threadId = await getThreadId(env, a.user.id);
+
+                const r = await env.DB.prepare(
+                    "SELECT id, role, content, created_at FROM messages WHERE user_id=? AND thread_id=? ORDER BY created_at ASC LIMIT ?"
+                )
+                    .bind(a.user.id, threadId, limit)
+                    .all<any>();
+
+                return json(req, env, { ok: true, thread_id: threadId, messages: r.results || [] });
             }
 
-            // ✅ 非万能邀请码才 mark used
-            if (!bypass) {
-                const usedOk = await markInviteUsed(env, inviteCode, newUserId);
-                if (!usedOk) {
-                    // rollback strategy: disable created user
-                    await env.DB.prepare("UPDATE users SET status='disabled', updated_at=? WHERE id=?")
-                        .bind(nowMs(), newUserId)
-                        .run();
-                    return json({ ok: false, error: "invite_race_failed" }, 409);
+            // -------------------------
+            // Thread: clear
+            // POST /api/thread/clear
+            // -------------------------
+            if (url.pathname === "/api/thread/clear" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const threadId = await getThreadId(env, a.user.id);
+
+                const r = await env.DB.prepare("DELETE FROM messages WHERE user_id=? AND thread_id=?")
+                    .bind(a.user.id, threadId)
+                    .run();
+
+                const changes = (r as any)?.meta?.changes ?? 0;
+
+                await saveMessage(env, a.user.id, threadId, "system", "（会话已清空）");
+
+                return json(req, env, { ok: true, deleted: changes });
+            }
+
+            // -------------------------
+            // Auth: register
+            // -------------------------
+            if (url.pathname === "/api/auth/register" && req.method === "POST") {
+                const body = (await req.json().catch(() => null)) as any;
+                const username = String(body?.username || "").trim();
+                const password = String(body?.password || "");
+                const inviteCode = String(body?.invite_code || "").trim();
+
+                if (!isValidUsername(username)) return badRequest(req, env, "invalid username (3~24, a-zA-Z0-9_-)");
+                if (!isValidPassword(password)) return badRequest(req, env, "invalid password (6~72)");
+                if (!isValidInvite(inviteCode)) return badRequest(req, env, "invite_code required");
+
+                const existing = await getUserByUsername(env, username);
+                if (existing) return json(req, env, { ok: false, error: "username_taken" }, 409);
+
+                const bypass = isMasterInvite(env, inviteCode);
+
+                if (!bypass) {
+                    const inviteCheck = await consumeInviteOrFail(env, inviteCode);
+                    if (!inviteCheck.ok) return json(req, env, { ok: false, error: inviteCheck.error }, 403);
                 }
-            }
 
-            // Create session
-            const session = await createSession(env, newUserId);
+                const userCount = await countUsers(env);
+                const role: Role = userCount === 0 ? "admin" : "user";
 
-            return json({
-                ok: true,
-                user: { id: newUserId, username, role },
-                token: session.token,
-                expires_at: session.expiresAt,
-                invite_bypassed: bypass, // 可选：方便前端/你自己调试
-            });
-        }
+                const passwordHash = await pbkdf2HashPassword(password);
 
-        // -------------------------
-        // Auth: login
-        // POST /api/auth/login { username, password }
-        // -------------------------
-        if (url.pathname === "/api/auth/login" && req.method === "POST") {
-            const body = (await req.json().catch(() => null)) as any;
-            const username = String(body?.username || "").trim();
-            const password = String(body?.password || "");
-
-            if (!isValidUsername(username)) return badRequest("invalid username");
-            if (!isValidPassword(password)) return badRequest("invalid password");
-
-            const u = await getUserByUsername(env, username);
-            if (!u) return unauthorized("invalid credentials");
-            if (u.status !== "active") return forbidden("user disabled");
-
-            const ok = await pbkdf2VerifyPassword(password, String(u.password_hash));
-            if (!ok) return unauthorized("invalid credentials");
-
-            const session = await createSession(env, String(u.id));
-            return json({
-                ok: true,
-                user: { id: String(u.id), username: String(u.username), role: String(u.role) as Role },
-                token: session.token,
-                expires_at: session.expiresAt,
-            });
-        }
-
-        // -------------------------
-        // Auth: me
-        // GET /api/auth/me
-        // -------------------------
-        if (url.pathname === "/api/auth/me" && req.method === "GET") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-            return json({ ok: true, user: a.user });
-        }
-
-        // -------------------------
-        // Admin: invites list/create/disable
-        // -------------------------
-        if (url.pathname === "/api/admin/invites" && req.method === "GET") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-            if (a.user.role !== "admin") return forbidden();
-
-            const status = (url.searchParams.get("status") || "").trim();
-            const where = status ? "WHERE status = ?" : "";
-            const stmt = `SELECT code, status, created_at, used_at, note, used_by_user_id, created_by_user_id FROM invites ${where} ORDER BY created_at DESC LIMIT 200`;
-
-            const r = status
-                ? await env.DB.prepare(stmt).bind(status).all<any>()
-                : await env.DB.prepare(stmt).all<any>();
-
-            return json({ ok: true, invites: r.results || [] });
-        }
-
-        if (url.pathname === "/api/admin/invites" && req.method === "POST") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-            if (a.user.role !== "admin") return forbidden();
-
-            const body = (await req.json().catch(() => null)) as any;
-            const note = body?.note ? String(body.note).slice(0, 200) : null;
-
-            // generate code (retry on collision)
-            let code = "";
-            for (let i = 0; i < 5; i++) {
-                code = randomInviteCode();
+                let newUserId = "";
                 try {
-                    await env.DB.prepare(
-                        "INSERT INTO invites (code, created_by_user_id, created_at, status, used_by_user_id, used_at, note) VALUES (?, ?, ?, 'active', NULL, NULL, ?)"
-                    )
-                        .bind(code, a.user.id, nowMs(), note)
-                        .run();
-                    break;
-                } catch {
-                    code = "";
+                    const created = await createUser(env, username, passwordHash, role);
+                    newUserId = created.id;
+                } catch (e: any) {
+                    return json(req, env, { ok: false, error: "db_error", detail: String(e?.message || e) }, 500);
                 }
-            }
-            if (!code) return json({ ok: false, error: "failed_to_generate_code" }, 500);
 
-            // audit (optional)
-            await env.DB.prepare(
-                "INSERT INTO admin_audit (id, admin_user_id, action, target, meta_json, created_at) VALUES (?, ?, 'create_invite', ?, ?, ?)"
-            )
-                .bind(uuid(), a.user.id, code, note ? JSON.stringify({ note }) : null, nowMs())
-                .run();
+                if (!bypass) {
+                    const usedOk = await markInviteUsed(env, inviteCode, newUserId);
+                    if (!usedOk) {
+                        await env.DB.prepare("UPDATE users SET status='disabled', updated_at=? WHERE id=?")
+                            .bind(nowMs(), newUserId)
+                            .run();
+                        return json(req, env, { ok: false, error: "invite_race_failed" }, 409);
+                    }
+                }
 
-            return json({ ok: true, code });
-        }
+                const session = await createSession(env, newUserId);
 
-        if (url.pathname === "/api/admin/invites/disable" && req.method === "POST") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-            if (a.user.role !== "admin") return forbidden();
-
-            const body = (await req.json().catch(() => null)) as any;
-            const code = String(body?.code || "").trim();
-            if (!code) return badRequest("code required");
-
-            const r = await env.DB.prepare("UPDATE invites SET status='disabled' WHERE code=? AND status='active'")
-                .bind(code)
-                .run();
-
-            await env.DB.prepare(
-                "INSERT INTO admin_audit (id, admin_user_id, action, target, meta_json, created_at) VALUES (?, ?, 'disable_invite', ?, NULL, ?)"
-            )
-                .bind(uuid(), a.user.id, code, nowMs())
-                .run();
-
-            const changes = (r as any)?.meta?.changes ?? 0;
-            return json({ ok: true, disabled: changes === 1 });
-        }
-
-        // -------------------------
-        // Settings: update user / companion
-        // -------------------------
-        if (url.pathname === "/api/settings/user" && req.method === "POST") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-
-            const body = (await req.json().catch(() => null)) as any;
-            const displayName = body?.display_name ? String(body.display_name).slice(0, 40) : null;
-            const avatarUrl = body?.avatar_url ? String(body.avatar_url).slice(0, 500) : null;
-            const themeId = body?.theme_id ? String(body.theme_id).slice(0, 40) : null;
-            const bubbleStyle = body?.bubble_style ? String(body.bubble_style).slice(0, 40) : null;
-
-            const t = nowMs();
-            await env.DB.prepare(
-                "UPDATE user_settings SET display_name = COALESCE(?, display_name), avatar_url = COALESCE(?, avatar_url), " +
-                "theme_id = COALESCE(?, theme_id), bubble_style = COALESCE(?, bubble_style), updated_at = ? WHERE user_id = ?"
-            )
-                .bind(displayName, avatarUrl, themeId, bubbleStyle, t, a.user.id)
-                .run();
-
-            return json({ ok: true });
-        }
-
-        if (url.pathname === "/api/settings/companion" && req.method === "POST") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-
-            const body = (await req.json().catch(() => null)) as any;
-            const companionName = body?.companion_name ? String(body.companion_name).slice(0, 20) : null;
-            const avatarUrl = body?.companion_avatar_url ? String(body.companion_avatar_url).slice(0, 500) : null;
-            const toneStyle = body?.tone_style ? String(body.tone_style).slice(0, 20) : null;
-
-            const t = nowMs();
-            await env.DB.prepare(
-                "UPDATE companion_profile SET companion_name = COALESCE(?, companion_name), companion_avatar_url = COALESCE(?, companion_avatar_url), " +
-                "tone_style = COALESCE(?, tone_style), updated_at = ? WHERE user_id = ?"
-            )
-                .bind(companionName, avatarUrl, toneStyle, t, a.user.id)
-                .run();
-
-            return json({ ok: true });
-        }
-
-        // -------------------------
-        // Memory delete
-        // -------------------------
-        if (url.pathname === "/api/memory/profile/delete" && req.method === "POST") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-
-            const body = (await req.json().catch(() => null)) as any;
-            const key = String(body?.key || "").trim();
-            if (!key) return badRequest("key required");
-
-            const r = await env.DB.prepare("DELETE FROM memory_profile WHERE user_id=? AND key=?")
-                .bind(a.user.id, key)
-                .run();
-            const changes = (r as any)?.meta?.changes ?? 0;
-            return json({ ok: true, deleted: changes === 1 });
-        }
-
-        if (url.pathname === "/api/memory/events/delete" && req.method === "POST") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-
-            const body = (await req.json().catch(() => null)) as any;
-            const id = String(body?.id || "").trim();
-            if (!id) return badRequest("id required");
-
-            const r = await env.DB.prepare("DELETE FROM memory_events WHERE user_id=? AND id=?")
-                .bind(a.user.id, id)
-                .run();
-            const changes = (r as any)?.meta?.changes ?? 0;
-            return json({ ok: true, deleted: changes === 1 });
-        }
-
-        // -------------------------
-        // Chat SSE (auth required)
-        // POST /api/chat { message }
-        // -------------------------
-        if (url.pathname === "/api/chat" && req.method === "POST") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-
-            const body = (await req.json().catch(() => null)) as any;
-            const message = String(body?.message || "").trim();
-            if (!message) return badRequest("message required");
-
-            const userId = a.user.id;
-            const threadId = await getThreadId(env, userId);
-
-            // save user msg
-            await saveMessage(env, userId, threadId, "user", message);
-
-            // load context
-            const { companion, rel, memoryText, recentAsc } = await loadContext(env, userId, threadId);
-            const system = buildSystemPrompt(companion, rel, memoryText);
-
-            const messages = [
-                { role: "system", content: system },
-                ...recentAsc.map((m: any) => ({ role: m.role, content: m.content })),
-                { role: "user", content: message },
-            ];
-
-            const payload = {
-                model: "deepseek-chat",
-                stream: true,
-                messages,
-                temperature: 0.45,
-                top_p: 0.9,
-            };
-
-            const upstream = await deepseekStream(env, payload);
-            if (!upstream.ok || !upstream.body) {
-                const text = await upstream.text().catch(() => "");
-                return json({ ok: false, error: "deepseek_error", detail: text }, 500);
+                return json(req, env, {
+                    ok: true,
+                    user: { id: newUserId, username, role },
+                    token: session.token,
+                    expires_at: session.expiresAt,
+                    invite_bypassed: bypass,
+                });
             }
 
-            const { readable, writable } = new TransformStream();
-            const writer = writable.getWriter();
-            const encoder = new TextEncoder();
+            // -------------------------
+            // Auth: login
+            // -------------------------
+            if (url.pathname === "/api/auth/login" && req.method === "POST") {
+                const body = (await req.json().catch(() => null)) as any;
+                const username = String(body?.username || "").trim();
+                const password = String(body?.password || "");
 
-            let assistantAll = "";
+                if (!isValidUsername(username)) return badRequest(req, env, "invalid username");
+                if (!isValidPassword(password)) return badRequest(req, env, "invalid password");
 
-            (async () => {
-                try {
-                    for await (const data of parseUpstreamSSE(upstream.body!)) {
-                        let delta = "";
-                        try {
-                            const j = JSON.parse(data);
-                            delta = j?.choices?.[0]?.delta?.content ?? "";
-                        } catch {
-                            continue;
+                const u = await getUserByUsername(env, username);
+                if (!u) return unauthorized(req, env, "invalid credentials");
+                if (u.status !== "active") return forbidden(req, env, "user disabled");
+
+                const ok = await pbkdf2VerifyPassword(password, String(u.password_hash));
+                if (!ok) return unauthorized(req, env, "invalid credentials");
+
+                const session = await createSession(env, String(u.id));
+                return json(req, env, {
+                    ok: true,
+                    user: { id: String(u.id), username: String(u.username), role: String(u.role) as Role },
+                    token: session.token,
+                    expires_at: session.expiresAt,
+                });
+            }
+
+            // -------------------------
+            // Auth: me
+            // -------------------------
+            if (url.pathname === "/api/auth/me" && req.method === "GET") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+                return json(req, env, { ok: true, user: a.user });
+            }
+
+            // -------------------------
+            // Admin: invites list/create/disable
+            // -------------------------
+            if (url.pathname === "/api/admin/invites" && req.method === "GET") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+                if (a.user.role !== "admin") return forbidden(req, env);
+
+                const status = (url.searchParams.get("status") || "").trim();
+                const where = status ? "WHERE status = ?" : "";
+                const stmt = `SELECT code, status, created_at, used_at, note, used_by_user_id, created_by_user_id FROM invites ${where} ORDER BY created_at DESC LIMIT 200`;
+
+                const r = status ? await env.DB.prepare(stmt).bind(status).all<any>() : await env.DB.prepare(stmt).all<any>();
+                return json(req, env, { ok: true, invites: r.results || [] });
+            }
+
+            if (url.pathname === "/api/admin/invites" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+                if (a.user.role !== "admin") return forbidden(req, env);
+
+                const body = (await req.json().catch(() => null)) as any;
+                const note = body?.note ? String(body.note).slice(0, 200) : null;
+
+                let code = "";
+                for (let i = 0; i < 5; i++) {
+                    code = randomInviteCode();
+                    try {
+                        await env.DB.prepare(
+                            "INSERT INTO invites (code, created_by_user_id, created_at, status, used_by_user_id, used_at, note) VALUES (?, ?, ?, 'active', NULL, NULL, ?)"
+                        )
+                            .bind(code, a.user.id, nowMs(), note)
+                            .run();
+                        break;
+                    } catch {
+                        code = "";
+                    }
+                }
+                if (!code) return json(req, env, { ok: false, error: "failed_to_generate_code" }, 500);
+
+                await env.DB.prepare(
+                    "INSERT INTO admin_audit (id, admin_user_id, action, target, meta_json, created_at) VALUES (?, ?, 'create_invite', ?, ?, ?)"
+                )
+                    .bind(uuid(), a.user.id, code, note ? JSON.stringify({ note }) : null, nowMs())
+                    .run();
+
+                return json(req, env, { ok: true, code });
+            }
+
+            if (url.pathname === "/api/admin/invites/disable" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+                if (a.user.role !== "admin") return forbidden(req, env);
+
+                const body = (await req.json().catch(() => null)) as any;
+                const code = String(body?.code || "").trim();
+                if (!code) return badRequest(req, env, "code required");
+
+                const r = await env.DB.prepare("UPDATE invites SET status='disabled' WHERE code=? AND status='active'")
+                    .bind(code)
+                    .run();
+
+                const changes = (r as any)?.meta?.changes ?? 0;
+                return json(req, env, { ok: true, disabled: changes === 1 });
+            }
+
+            // -------------------------
+            // Settings: update user / companion
+            // -------------------------
+            if (url.pathname === "/api/settings/user" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const body = (await req.json().catch(() => null)) as any;
+                const displayName = body?.display_name ? String(body.display_name).slice(0, 40) : null;
+                const avatarUrl = body?.avatar_url ? String(body.avatar_url).slice(0, 500) : null;
+                const themeId = body?.theme_id ? String(body.theme_id).slice(0, 40) : null;
+                const bubbleStyle = body?.bubble_style ? String(body.bubble_style).slice(0, 40) : null;
+
+                const t = nowMs();
+                await env.DB.prepare(
+                    "UPDATE user_settings SET display_name = COALESCE(?, display_name), avatar_url = COALESCE(?, avatar_url), " +
+                    "theme_id = COALESCE(?, theme_id), bubble_style = COALESCE(?, bubble_style), updated_at = ? WHERE user_id = ?"
+                )
+                    .bind(displayName, avatarUrl, themeId, bubbleStyle, t, a.user.id)
+                    .run();
+
+                return json(req, env, { ok: true });
+            }
+
+            if (url.pathname === "/api/settings/companion" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const body = (await req.json().catch(() => null)) as any;
+                const companionName = body?.companion_name ? String(body.companion_name).slice(0, 20) : null;
+                const avatarUrl = body?.companion_avatar_url ? String(body.companion_avatar_url).slice(0, 500) : null;
+                const toneStyle = body?.tone_style ? String(body.tone_style).slice(0, 20) : null;
+
+                const t = nowMs();
+                await env.DB.prepare(
+                    "UPDATE companion_profile SET companion_name = COALESCE(?, companion_name), companion_avatar_url = COALESCE(?, companion_avatar_url), " +
+                    "tone_style = COALESCE(?, tone_style), updated_at = ? WHERE user_id = ?"
+                )
+                    .bind(companionName, avatarUrl, toneStyle, t, a.user.id)
+                    .run();
+
+                return json(req, env, { ok: true });
+            }
+
+            // -------------------------
+            // Memory delete
+            // -------------------------
+            if (url.pathname === "/api/memory/profile/delete" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const body = (await req.json().catch(() => null)) as any;
+                const key = String(body?.key || "").trim();
+                if (!key) return badRequest(req, env, "key required");
+
+                const r = await env.DB.prepare("DELETE FROM memory_profile WHERE user_id=? AND key=?").bind(a.user.id, key).run();
+                const changes = (r as any)?.meta?.changes ?? 0;
+                return json(req, env, { ok: true, deleted: changes === 1 });
+            }
+
+            if (url.pathname === "/api/memory/events/delete" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const body = (await req.json().catch(() => null)) as any;
+                const id = String(body?.id || "").trim();
+                if (!id) return badRequest(req, env, "id required");
+
+                const r = await env.DB.prepare("DELETE FROM memory_events WHERE user_id=? AND id=?").bind(a.user.id, id).run();
+                const changes = (r as any)?.meta?.changes ?? 0;
+                return json(req, env, { ok: true, deleted: changes === 1 });
+            }
+
+            // -------------------------
+            // Chat SSE
+            // -------------------------
+            if (url.pathname === "/api/chat" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
+
+                const body = (await req.json().catch(() => null)) as any;
+                const message = String(body?.message || "").trim();
+                if (!message) return badRequest(req, env, "message required");
+
+                const userId = a.user.id;
+                const threadId = await getThreadId(env, userId);
+
+                await saveMessage(env, userId, threadId, "user", message);
+
+                const { companion, rel, memoryText, recentAsc } = await loadContext(env, userId, threadId);
+                const system = buildSystemPrompt(companion, rel, memoryText);
+
+                const messages = [
+                    { role: "system", content: system },
+                    ...recentAsc.map((m: any) => ({ role: m.role, content: m.content })),
+                    { role: "user", content: message },
+                ];
+
+                const payload = { model: "deepseek-chat", stream: true, messages, temperature: 0.45, top_p: 0.9 };
+
+                const upstream = await deepseekStream(env, payload);
+                if (!upstream.ok || !upstream.body) {
+                    const text = await upstream.text().catch(() => "");
+                    return json(req, env, { ok: false, error: "deepseek_error", detail: text }, 500);
+                }
+
+                const { readable, writable } = new TransformStream();
+                const writer = writable.getWriter();
+                const encoder = new TextEncoder();
+                let assistantAll = "";
+
+                (async () => {
+                    try {
+                        for await (const data of parseUpstreamSSE(upstream.body!)) {
+                            let delta = "";
+                            try {
+                                const j = JSON.parse(data);
+                                delta = j?.choices?.[0]?.delta?.content ?? "";
+                            } catch {
+                                continue;
+                            }
+
+                            if (delta) {
+                                assistantAll += delta;
+                                await writer.write(encoder.encode(`data: ${delta}\n\n`));
+                            }
                         }
 
-                        if (delta) {
-                            assistantAll += delta;
-                            await writer.write(encoder.encode(`data: ${delta}\n\n`));
+                        if (assistantAll.trim()) {
+                            await saveMessage(env, userId, threadId, "assistant", assistantAll.trim());
                         }
+
+                        await writer.write(encoder.encode(`data: [DONE]\n\n`));
+                    } catch {
+                        await writer.write(encoder.encode(`data: （流式中断）\n\n`));
+                        await writer.write(encoder.encode(`data: [DONE]\n\n`));
+                    } finally {
+                        await writer.close();
                     }
+                })();
 
-                    if (assistantAll.trim()) {
-                        await saveMessage(env, userId, threadId, "assistant", assistantAll.trim());
-                    }
+                return new Response(readable, {
+                    headers: {
+                        ...corsHeaders(req, env),
+                        "Content-Type": "text/event-stream; charset=utf-8",
+                        "Cache-Control": "no-cache, no-transform",
+                        Connection: "keep-alive",
+                    },
+                });
+            }
 
-                    await writer.write(encoder.encode(`data: [DONE]\n\n`));
-                } catch {
-                    await writer.write(encoder.encode(`data: （流式中断）\n\n`));
-                    await writer.write(encoder.encode(`data: [DONE]\n\n`));
-                } finally {
-                    await writer.close();
-                }
-            })();
+            // -------------------------
+            // Finalize
+            // -------------------------
+            if (url.pathname === "/api/finalize" && req.method === "POST") {
+                const a = await requireAuth(env, req);
+                if (!a.ok) return a.resp;
 
-            return new Response(readable, {
-                headers: {
-                    ...corsHeaders(),
-                    "Content-Type": "text/event-stream; charset=utf-8",
-                    "Cache-Control": "no-cache, no-transform",
-                    Connection: "keep-alive",
-                },
-            });
+                const userId = a.user.id;
+                const threadId = await getThreadId(env, userId);
+
+                const result = await finalizeMvp(env, userId, threadId);
+                return json(req, env, result, result.ok ? 200 : 500);
+            }
+
+            return notFound(req, env);
+        } catch (e: any) {
+            return json(req, env, { ok: false, error: "internal_error", detail: String(e?.message || e) }, 500);
         }
-
-        // -------------------------
-        // Finalize (auth required)
-        // POST /api/finalize
-        // -------------------------
-        if (url.pathname === "/api/finalize" && req.method === "POST") {
-            const a = await requireAuth(env, req);
-            if (!a.ok) return a.resp;
-
-            const userId = a.user.id;
-            const threadId = await getThreadId(env, userId);
-
-            const result = await finalizeMvp(env, userId, threadId);
-            return json(result, result.ok ? 200 : 500);
-        }
-
-        return notFound();
     },
 };

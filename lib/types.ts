@@ -1,5 +1,4 @@
 // lib/types.ts
-
 export type Role = "admin" | "user";
 
 export type AuthUser = {
@@ -8,31 +7,22 @@ export type AuthUser = {
     role: Role;
 };
 
-export type UserSettings = {
-    user_id: string;
-    display_name: string | null;
-    avatar_url: string | null;
-    theme_id: string;
-    bubble_style: string;
-    updated_at: number;
-};
+export type ChatRole = "user" | "assistant" | "system";
 
-export type CompanionProfile = {
-    user_id: string;
-    companion_name: string;
-    companion_avatar_url: string | null;
-    tone_style: string;
-    updated_at: number;
-};
-
-export type InviteStatus = "active" | "used" | "disabled";
-
-export type Invite = {
-    code: string;
-    status: InviteStatus;
+export type Msg = {
+    id: string;
+    role: ChatRole;
+    content: string;
     created_at: number;
-    used_at?: number | null;
-    note?: string | null;
-    used_by_user_id?: string | null;
-    created_by_user_id?: string | null;
 };
+
+export type ApiOk<T> = { ok: true } & T;
+export type ApiErr = { ok: false; error: string; detail?: string };
+
+export type RegisterResp =
+    | ApiOk<{ user: AuthUser; token: string; expires_at: number; invite_bypassed?: boolean }>
+    | ApiErr;
+
+export type LoginResp =
+    | ApiOk<{ user: AuthUser; token: string; expires_at: number }>
+    | ApiErr;

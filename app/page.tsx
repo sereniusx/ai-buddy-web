@@ -1,155 +1,226 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "../lib/api";
-import { getSavedUser, logout } from "../lib/auth";
+import { getSavedUser, getToken, logout } from "../lib/auth";
+import type { Msg } from "../lib/types";
 import { useRouter } from "next/navigation";
 
-type Msg = { role: "user" | "assistant"; content: string };
+function uid() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
-export default function Home() {
+function now() {
+  return Date.now();
+}
+
+function isNearBottom(el: HTMLElement, threshold = 120) {
+  const { scrollTop, scrollHeight, clientHeight } = el;
+  return scrollHeight - (scrollTop + clientHeight) < threshold;
+}
+
+export default function HomePage() {
   const router = useRouter();
-  const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Msg[]>([]);
-  const [streaming, setStreaming] = useState(false);
-  const [userRole, setUserRole] = useState<"admin" | "user" | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const user = useMemo(() => getSavedUser(), []);
+  const token = useMemo(() => getToken(), []);
+
+  const [msgs, setMsgs] = useState<Msg[]>(() => [
+    {
+      id: uid(),
+      role: "system",
+      content: "欢迎回来。想先聊聊你今天的状态吗？",
+      created_at: now(),
+    },
+  ]);
+
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollRef = useRef(true);
 
   useEffect(() => {
-    const u = getSavedUser();
-    if (!u) {
-      router.replace("/login");
-      return;
-    }
-    setUserRole(u.role);
-  }, [router]);
+    if (!token || !user) router.replace("/login");
+  }, [token, user, router]);
 
+  // 监听滚动：用户上滑就停止自动滚动
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    const el = listRef.current;
+    if (!el) return;
 
-  async function send() {
-    const text = input.trim();
-    if (!text || streaming) return;
+    const onScroll = () => {
+      autoScrollRef.current = isNearBottom(el, 140);
+    };
 
-    setInput("");
-    setMessages((m) => [...m, { role: "user", content: text }, { role: "assistant", content: "" }]);
-    setStreaming(true);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
 
-    const res = await apiFetch("/api/chat", {
-      method: "POST",
-      body: JSON.stringify({ message: text }),
-    });
+  // 消息变化：如果允许自动滚动，则滚到底
+  useEffect(() => {
+    if (!autoScrollRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [msgs]);
 
-    if (!res.ok || !res.body) {
-      setStreaming(false);
-      const errText = await res.text().catch(() => "");
-      setMessages((m) => {
-        const copy = [...m];
-        copy[copy.length - 1] = { role: "assistant", content: `请求失败：${res.status}\n${errText}` };
-        return copy;
-      });
-
-      // token 失效会被 apiFetch 里清掉；这里直接跳转
-      if (res.status === 401) router.replace("/login");
-      return;
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-
-      const parts = chunk.split("\n\n");
-      for (const part of parts) {
-        const line = part.trim();
-        if (!line) continue;
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-
-        if (data === "[DONE]") {
-          setStreaming(false);
-          return;
-        }
-
-        setMessages((m) => {
-          const copy = [...m];
-          const last = copy[copy.length - 1];
-          if (last?.role === "assistant") {
-            copy[copy.length - 1] = { role: "assistant", content: last.content + data };
-          }
-          return copy;
-        });
-      }
-    }
-
-    setStreaming(false);
+  function clearChat() {
+    setMsgs([
+      {
+        id: uid(),
+        role: "system",
+        content: "会话已清空（仅清空本地显示）。你想从哪里继续？",
+        created_at: now(),
+      },
+    ]);
+    setErr(null);
+    setText("");
   }
 
-  function onLogout() {
+  function doLogout() {
     logout();
     router.replace("/login");
   }
 
-  if (userRole === null) return null;
+  const canSend = !busy && text.trim().length > 0;
+
+  async function send() {
+    if (!canSend) return;
+    setErr(null);
+
+    const content = text.trim();
+    setText("");
+    setBusy(true);
+
+    const userMsg: Msg = { id: uid(), role: "user", content, created_at: now() };
+    const assistantId = uid();
+    const assistantMsg: Msg = { id: assistantId, role: "assistant", content: "", created_at: now() };
+
+    setMsgs((prev) => [...prev, userMsg, assistantMsg]);
+
+    try {
+      const res = await apiFetch("/api/chat", {
+        method: "POST",
+        body: JSON.stringify({ message: content }),
+      });
+
+      if (!res.ok || !res.body) {
+        const j = await res.json().catch(() => null);
+        const msg = j?.error ? `请求失败：${j.error}` : `请求失败：${res.status}`;
+        setErr(msg);
+        // 回填到 assistant 气泡
+        setMsgs((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, content: "（网络或服务异常，稍后再试。）" } : m))
+        );
+        return;
+      }
+
+      // SSE: data: xxx\n\n
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // 逐段按 \n\n 分割
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const chunk = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+
+          const line = chunk.trim();
+          if (!line.startsWith("data:")) continue;
+
+          const data = line.slice(5).trim();
+          if (!data) continue;
+          if (data === "[DONE]") break;
+
+          setMsgs((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, content: m.content + data } : m))
+          );
+        }
+      }
+    } catch (e: any) {
+      setErr(`网络错误：${String(e?.message || e)}`);
+      setMsgs((prev) =>
+          prev.map((m) => (m.id === assistantId ? { ...m, content: "（网络错误，稍后再试。）" } : m))
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  }
 
   return (
-      <div style={{ maxWidth: 720, margin: "0 auto", padding: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>AI 小伙伴</h1>
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            {userRole === "admin" ? (
-                <a href="/admin" style={{ fontSize: 13, color: "#111", fontWeight: 600 }}>
-                  管理
-                </a>
-            ) : null}
-            <button
-                onClick={onLogout}
-                style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ddd", fontSize: 13 }}
-            >
-              退出
-            </button>
+      <div className="container">
+        <div className="card">
+          <div className="topbar">
+            <div className="brand">
+              <div className="logo" />
+              <div className="title">
+                <strong>{user ? `AI Buddy · ${user.username}` : "AI Buddy"}</strong>
+                <span>长期陪伴 · 单线程对话</span>
+              </div>
+            </div>
+
+            <div className="actions">
+              <button className="btn danger" onClick={clearChat} title="清空本地消息显示">
+                清空会话
+              </button>
+              <button className="btn" onClick={doLogout}>
+                退出
+              </button>
+            </div>
+          </div>
+
+          <div className="chatWrap">
+            <div className="chatList" ref={listRef}>
+              <div className="dayHint">今天</div>
+
+              {msgs.map((m) => (
+                  <div key={m.id} className={`row ${m.role}`}>
+                    <div className={`bubble ${m.role}`}>{m.content}</div>
+                  </div>
+              ))}
+
+              {err ? (
+                  <div className="row system">
+                    <div className="bubble system">⚠️ {err}</div>
+                  </div>
+              ) : null}
+
+              <div ref={bottomRef} />
+            </div>
+
+            <div className="composer">
+              <input
+                  className="input"
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="像发微信一样输入…（Enter 发送）"
+                  onKeyDown={onKeyDown}
+                  disabled={busy}
+              />
+              <button className={canSend ? "send" : "sendDisabled"} onClick={send} disabled={!canSend}>
+                {busy ? "发送…" : "发送"}
+              </button>
+            </div>
           </div>
         </div>
 
-        <div style={{ marginTop: 12, border: "1px solid #eee", borderRadius: 12, padding: 12, minHeight: 420 }}>
-          {messages.length === 0 ? (
-              <div style={{ color: "#666" }}>开始聊天吧～</div>
-          ) : (
-              messages.map((m, i) => (
-                  <div key={i} style={{ margin: "10px 0" }}>
-                    <div style={{ fontSize: 12, color: "#888" }}>{m.role === "user" ? "你" : "TA"}</div>
-                    <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{m.content}</div>
-                  </div>
-              ))
-          )}
-          <div ref={bottomRef} />
-        </div>
-
-        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-          <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="输入消息…"
-              style={{ flex: 1, padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") send();
-              }}
-          />
-          <button
-              onClick={send}
-              disabled={streaming}
-              style={{ padding: "10px 14px", borderRadius: 10, border: "1px solid #ddd" }}
-          >
-            {streaming ? "发送中…" : "发送"}
-          </button>
-        </div>
-
-        <div style={{ marginTop: 10, fontSize: 12, color: "#888" }}>
-          提示：测试期需邀请码注册；管理员可在“管理”里生成邀请码。
+        <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 12, textAlign: "center" }}>
+          提示：上滑查看历史时会自动停止滚动；回到底部会恢复自动滚动。
         </div>
       </div>
   );
